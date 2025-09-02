@@ -118,7 +118,7 @@ app.post('/auth/google', async (req, res) => {
 // File operations - now fully MySQL-based
 app.get('/files', async (req, res) => {
     try {
-        const sessionId = req.query.sessionId || req.header('x-session-id');
+        const sessionId = req.query.sessionId || req.headers['x-session-id'];
         
         if (!sessionId) {
             return res.status(400).json({ error: 'Session ID required' });
@@ -150,7 +150,7 @@ app.get('/files', async (req, res) => {
 app.post('/files/open', async (req, res) => {
     try {
         const { filename } = req.body;
-        const sessionId = req.header('x-session-id');
+        const sessionId = req.headers['x-session-id'];
         
         if (!filename || !sessionId) {
             return res.status(400).json({ error: 'filename and sessionId required' });
@@ -173,7 +173,7 @@ app.post('/files/open', async (req, res) => {
 app.post('/files/save', async (req, res) => {
     try {
         const { filename, content } = req.body;
-        const sessionId = req.header('x-session-id');
+        const sessionId = req.headers['x-session-id'];
         
         if (!filename || !sessionId) {
             return res.status(400).json({ error: 'filename and sessionId required' });
@@ -191,7 +191,7 @@ app.post('/files/save', async (req, res) => {
 app.delete('/files/:filename', async (req, res) => {
     try {
         const { filename } = req.params;
-        const sessionId = req.header('x-session-id');
+        const sessionId = req.headers['x-session-id'];
         
         if (!filename || !sessionId) {
             return res.status(400).json({ error: 'filename and sessionId required' });
@@ -332,7 +332,7 @@ wss.on('connection', (ws) => {
                 session.ptyReady = true;
                 console.log('✅ PTY process initialized for session:', sessionId);
                 
-                ws.send(JSON.stringify({ type: 'ready' }));
+                ws.send(JSON.stringify({ type: 'pty-ready', sessionId: sessionId, message: 'Terminal ready' }));
             } catch (ptyError) {
                 console.error('❌ Failed to initialize PTY:', ptyError);
                 ws.send(JSON.stringify({ type: 'error', message: 'Failed to initialize terminal' }));
@@ -359,7 +359,7 @@ wss.on('connection', (ws) => {
                 session.ws = ws;
                 
                 if (session.ptyReady) {
-                    ws.send(JSON.stringify({ type: 'ready' }));
+                    ws.send(JSON.stringify({ type: 'pty-ready', sessionId: sessionId, message: 'Terminal ready' }));
                 } else {
                     ws.send(JSON.stringify({ type: 'error', message: 'Session not ready' }));
                 }
