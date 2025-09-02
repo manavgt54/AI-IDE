@@ -5,7 +5,7 @@ const DB_CONFIG = {
   user: process.env.MYSQL_USER || 'avnadmin',
   password: process.env.MYSQL_PASSWORD || 'AVNS_FkeJInRYwsl-nOBEGIz',
   database: process.env.MYSQL_DATABASE || 'defaultdb',
-  port: parseInt(process.env.MYSQL_PORT || '21010'),
+  port: parseInt(process.env.MYSQL_PORT || '14386'),
   ssl: { rejectUnauthorized: false },
   // Add connection timeout settings
   connectTimeout: 60000, // 60 seconds
