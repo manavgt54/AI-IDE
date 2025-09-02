@@ -42,10 +42,27 @@ try {
     }
 }
 
-// Ensure workspace directory exists
+// Ensure workspace directory exists and clean it
 if (!fs.existsSync(WORKSPACE_DIR)) {
     fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
     console.log(`✅ Created workspace directory: ${WORKSPACE_DIR}`);
+} else {
+    // Clean existing workspace files (remove backend files)
+    try {
+        const files = fs.readdirSync(WORKSPACE_DIR);
+        for (const file of files) {
+            if (file !== 'sessions') { // Keep sessions directory
+                const filePath = path.join(WORKSPACE_DIR, file);
+                if (fs.statSync(filePath).isFile()) {
+                    fs.unlinkSync(filePath);
+                    console.log(`🗑️ Removed backend file: ${file}`);
+                }
+            }
+        }
+        console.log('🧹 Cleaned backend workspace files');
+    } catch (cleanError) {
+        console.error('⚠️ Error cleaning workspace:', cleanError);
+    }
 }
 
 const app = express();
@@ -327,16 +344,33 @@ wss.on('connection', (ws) => {
                 console.error('⚠️ Error syncing files to session workspace:', syncError);
             }
             
-            // Initialize PTY process
+            // Initialize PTY process with restricted environment
             try {
                 const { spawn } = await import('node-pty');
+                
+                // Create restricted environment - only allow access to session workspace
+                const restrictedEnv = {
+                    ...process.env,
+                    HOME: sessionWorkspaceDir,
+                    PWD: sessionWorkspaceDir,
+                    PATH: '/usr/local/bin:/usr/bin:/bin',
+                    TERM: 'xterm-color'
+                };
+                
                 session.ptyProcess = spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
                     name: 'xterm-color',
                     cols: 80,
                     rows: 30,
                     cwd: sessionWorkspaceDir,
-                    env: process.env
+                    env: restrictedEnv
                 });
+                
+                // Override cd command to prevent access to parent directories
+                session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
+                session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
+                session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                session.ptyProcess.write('function cd() { if [[ "$1" == "/"* ]] && [[ "$1" != "' + sessionWorkspaceDir + '"* ]]; then echo "Access denied: Cannot access system directories"; return 1; fi; builtin cd "$@"; }\n');
+                session.ptyProcess.write('export -f cd\n');
                 
                 session.ptyProcess.onData((data) => {
                     if (session.ws && session.ws.readyState === WebSocket.OPEN) {
@@ -410,6 +444,67 @@ wss.on('connection', (ws) => {
             if (sessions.has(sessionId)) {
                 const session = sessions.get(sessionId);
                 if (session.ptyProcess && session.ptyReady) {
+                    // Block dangerous commands that could access system files
+                    const dangerousCommands = [
+                        'cd /app',
+                        'cd /',
+                        'cd /root',
+                        'cd /home',
+                        'cd /etc',
+                        'cd /var',
+                        'cd /usr',
+                        'cd /bin',
+                        'cd /sbin',
+                        'cd /opt',
+                        'cd /tmp',
+                        'cd /dev',
+                        'cd /proc',
+                        'cd /sys',
+                        'ls /app',
+                        'ls /',
+                        'ls /root',
+                        'ls /home',
+                        'ls /etc',
+                        'ls /var',
+                        'ls /usr',
+                        'ls /bin',
+                        'ls /sbin',
+                        'ls /opt',
+                        'ls /tmp',
+                        'ls /dev',
+                        'ls /proc',
+                        'ls /sys',
+                        'cat /etc',
+                        'cat /proc',
+                        'cat /sys',
+                        'rm -rf /',
+                        'rm -rf /app',
+                        'sudo',
+                        'su',
+                        'passwd',
+                        'chmod',
+                        'chown',
+                        'mount',
+                        'umount',
+                        'fdisk',
+                        'dd',
+                        'mkfs',
+                        'fsck'
+                    ];
+                    
+                    const inputLower = input.toLowerCase().trim();
+                    const isDangerous = dangerousCommands.some(cmd => 
+                        inputLower.includes(cmd.toLowerCase())
+                    );
+                    
+                    if (isDangerous) {
+                        ws.send(JSON.stringify({ 
+                            type: 'output', 
+                            data: `\r\n\x1b[31m[SECURITY] Access denied: Command blocked for security reasons\x1b[0m\r\n` 
+                        }));
+                        return;
+                    }
+                    
                     session.ptyProcess.write(input);
                 } else {
                     ws.send(JSON.stringify({ type: 'error', message: 'Terminal not ready' }));
