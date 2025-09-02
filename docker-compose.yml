@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ide-backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=development
+      - PORT=8000
+      - TERM=xterm-256color
+      - SHELL=/bin/bash
+      - PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+      - PTY_ALLOWED=true
+      - MAX_TERMINAL_SESSIONS=10
+      - WS_HEARTBEAT_INTERVAL=30000
+      - WS_MAX_PAYLOAD_SIZE=1048576
+    volumes:
+      - ./workspace:/app/workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

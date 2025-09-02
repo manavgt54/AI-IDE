@@ -1,0 +1,38 @@
+{
+  "name": "ide-backend",
+  "version": "1.0.0",
+  "description": "IDE Backend with node-pty terminal support",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node startup.prod.js && node server.js",
+    "start:direct": "node server.direct.js",
+    "dev": "nodemon server.js",
+    "startup": "node startup.js",
+    "test": "node test_terminal.js",
+    "build": "bash build.sh",
+    "health": "curl -s http://localhost:8000/health | jq . || echo 'Health check failed'",
+    "sessions": "curl -s http://localhost:8000/terminal/sessions | jq . || echo 'Sessions check failed'",
+    "postinstall": "npm rebuild node-pty --unsafe-perm"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "fs-extra": "^11.1.1",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.11.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "overrides": {
+    "node-pty": {
+      "build-from-source": true
+    }
+  }
+}

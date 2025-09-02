@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: ide-backend
+    env: node
+    buildCommand: bash build.sh
+    startCommand: npm run start:direct
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8000
+      - key: CONTAINER
+        value: true
+      # Terminal environment variables for proper PTY operation
+      - key: TERM
+        value: "xterm-256color"
+      - key: SHELL
+        value: "/bin/bash"
+      - key: PATH
+        value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      # Security and terminal limits
+      - key: PTY_ALLOWED
+        value: "true"
+      - key: MAX_TERMINAL_SESSIONS
+        value: "10"
+      # WebSocket connection settings
+      - key: WS_HEARTBEAT_INTERVAL
+        value: "30000"
+      - key: WS_MAX_PAYLOAD_SIZE
+        value: "1048576"

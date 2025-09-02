@@ -1,0 +1,38 @@
+# Use Node.js 18 Alpine for smaller image size
+FROM node:18-alpine
+
+# Install additional tools for terminal functionality
+RUN apk add --no-cache \
+    bash \
+    git \
+    python3 \
+    py3-pip \
+    gcc \
+    g++ \
+    make \
+    && rm -rf /var/cache/apk/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package*.json ./
+
+# Install dependencies with fallback strategy
+RUN if [ -f package-lock.json ]; then \
+        npm ci --production --no-optional; \
+    else \
+        npm install --production --no-optional; \
+    fi
+
+# Copy source code
+COPY . .
+
+# Create workspace directory
+RUN mkdir -p workspace
+
+# Expose port
+EXPOSE 8000
+
+# Start the application
+CMD ["npm", "start"]
