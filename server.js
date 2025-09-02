@@ -293,17 +293,39 @@ wss.on('connection', (ws) => {
             currentSessionId = sessionId;
             console.log('🔧 Initializing session:', sessionId);
             
+            // Create session-specific workspace directory
+            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            if (!fs.existsSync(sessionWorkspaceDir)) {
+                fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
+                console.log('📁 Created session workspace:', sessionWorkspaceDir);
+            }
+            
             // Create new session
             const session = {
                 ws,
                 ptyProcess: null,
                 userId: null,
-                currentCwd: WORKSPACE_DIR,
+                currentCwd: sessionWorkspaceDir,
                 ptyReady: false,
                 containerId: null
             };
             
             sessions.set(sessionId, session);
+            
+            // Sync files from database to session workspace
+            try {
+                const files = await listFilesBySession(sessionId);
+                for (const file of files) {
+                    const content = await readFileByName({ sessionId, filename: file.filename });
+                    if (content) {
+                        const filePath = path.join(sessionWorkspaceDir, file.filename);
+                        fs.writeFileSync(filePath, content);
+                        console.log('📄 Synced file to session workspace:', file.filename);
+                    }
+                }
+            } catch (syncError) {
+                console.error('⚠️ Error syncing files to session workspace:', syncError);
+            }
             
             // Initialize PTY process
             try {
@@ -312,7 +334,7 @@ wss.on('connection', (ws) => {
                     name: 'xterm-color',
                     cols: 80,
                     rows: 30,
-                    cwd: WORKSPACE_DIR,
+                    cwd: sessionWorkspaceDir,
                     env: process.env
                 });
                 
