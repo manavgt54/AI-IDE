@@ -63,6 +63,26 @@ app.get('/', (req, res) => {
     });
 });
 
+// Database test endpoint
+app.get('/test-db', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const [rows] = await pool.query('SELECT 1 as test');
+        res.json({ 
+            status: 'database_connected', 
+            test: rows[0].test,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Database test failed:', error);
+        res.status(500).json({ 
+            status: 'database_error', 
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy', 
@@ -85,6 +105,17 @@ app.post('/auth/google', async (req, res) => {
             return res.status(400).json({ error: 'googleId or email required' })
         }
         console.log('📝 Creating user and session for:', { googleId, email })
+        
+        // Test database connection first
+        try {
+            const pool = await getPool();
+            await pool.query('SELECT 1');
+            console.log('✅ Database connection verified');
+        } catch (dbError) {
+            console.error('❌ Database connection failed:', dbError);
+            return res.status(500).json({ error: 'database_connection_failed', details: dbError.message })
+        }
+        
         const { userId, sessionId } = await upsertUserAndCreateSession({ googleId, email })
         console.log('✅ User and session created:', { userId, sessionId })
         return res.json({ ok: true, userId, sessionId })

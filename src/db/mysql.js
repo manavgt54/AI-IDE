@@ -7,49 +7,87 @@ const DB_CONFIG = {
   database: process.env.MYSQL_DATABASE || 'defaultdb',
   port: parseInt(process.env.MYSQL_PORT || '21010'),
   ssl: { rejectUnauthorized: false },
+  // Add connection timeout settings
+  connectTimeout: 60000, // 60 seconds
+  acquireTimeout: 60000, // 60 seconds
+  timeout: 60000, // 60 seconds
+  // Add connection pool settings
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  // Add retry settings
+  maxRetries: 3,
+  retryDelay: 1000,
 }
 
 let pool
 
 export async function getPool() {
   if (!pool) {
+    console.log('🗄️ MySQL: Creating connection pool...');
+    console.log('🗄️ MySQL: Host:', DB_CONFIG.host);
+    console.log('🗄️ MySQL: Port:', DB_CONFIG.port);
+    console.log('🗄️ MySQL: Database:', DB_CONFIG.database);
+    console.log('🗄️ MySQL: User:', DB_CONFIG.user);
+    
     pool = mysql.createPool({
       ...DB_CONFIG,
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
     })
+    
+    // Test the connection
+    try {
+      const connection = await pool.getConnection();
+      console.log('✅ MySQL: Connection test successful');
+      connection.release();
+    } catch (error) {
+      console.error('❌ MySQL: Connection test failed:', error);
+      throw error;
+    }
   }
   return pool
 }
 
 export async function initSchema() {
+  console.log('🗄️ MySQL: Initializing database schema...');
   const pool = await getPool()
-  await pool.query(`CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    google_id VARCHAR(128) UNIQUE,
-    email VARCHAR(255),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  ) ENGINE=InnoDB;`)
+  
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      google_id VARCHAR(128) UNIQUE,
+      email VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;`)
+    console.log('✅ MySQL: Users table created');
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
-    session_id VARCHAR(64) PRIMARY KEY,
-    user_id INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-  ) ENGINE=InnoDB;`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
+      session_id VARCHAR(64) PRIMARY KEY,
+      user_id INT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;`)
+    console.log('✅ MySQL: Sessions table created');
 
-  await pool.query(`CREATE TABLE IF NOT EXISTS files (
-    file_id INT AUTO_INCREMENT PRIMARY KEY,
-    session_id VARCHAR(64) NOT NULL,
-    filename VARCHAR(512) NOT NULL,
-    content LONGBLOB,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_files_session FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
-    INDEX idx_files_session (session_id),
-    INDEX idx_files_name (filename)
-  ) ENGINE=InnoDB;`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS files (
+      file_id INT AUTO_INCREMENT PRIMARY KEY,
+      session_id VARCHAR(64) NOT NULL,
+      filename VARCHAR(512) NOT NULL,
+      content LONGBLOB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_files_session FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+      INDEX idx_files_session (session_id),
+      INDEX idx_files_name (filename)
+    ) ENGINE=InnoDB;`)
+    console.log('✅ MySQL: Files table created');
+    console.log('✅ MySQL: Database schema initialized successfully');
+  } catch (error) {
+    console.error('❌ MySQL: Schema initialization failed:', error);
+    throw error;
+  }
 }
 
 export async function upsertUserAndCreateSession({ googleId, email }) {
