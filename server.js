@@ -364,7 +364,10 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'Session not ready' }));
                 }
             } else {
-                ws.send(JSON.stringify({ type: 'error', message: 'Session not found' }));
+                // Session doesn't exist in memory, but exists in database
+                // Create a new session in memory for this sessionId
+                console.log('🆕 Creating new session in memory for existing sessionId:', sessionId);
+                await handleInit(ws, { sessionId });
             }
         } catch (error) {
             console.error('❌ Error in handleReconnect:', error);
