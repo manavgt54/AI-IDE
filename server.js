@@ -6,7 +6,7 @@ import fs from 'fs';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
-import { initSchema, upsertUserAndCreateSession, readFileByName, saveFile, listFilesBySession, deleteSession, getPool } from './src/db/mysql.js';
+import { initSchema, upsertUserAndCreateSession, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName } from './src/db/mysql.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -132,6 +132,51 @@ app.post('/auth/google', async (req, res) => {
     }
 });
 
+// Return a stable session for a given Google account (create if missing)
+app.post('/auth/session', async (req, res) => {
+    try {
+        const { googleId, email } = req.body || {};
+        if (!googleId && !email) {
+            return res.status(400).json({ error: 'googleId or email required' });
+        }
+        const pool = await getPool();
+        // Find or create user
+        let userId = null;
+        const [users] = await pool.execute(
+            'SELECT id FROM users WHERE google_id = ? OR email = ? LIMIT 1',
+            [googleId || null, email || null]
+        );
+        if (Array.isArray(users) && users.length > 0) {
+            userId = users[0].id;
+        } else {
+            const [r] = await pool.execute(
+                'INSERT INTO users (google_id, email) VALUES (?, ?)',
+                [googleId || null, email || null]
+            );
+            userId = r.insertId;
+        }
+        // Find latest session for user
+        const [sessionsRows] = await pool.execute(
+            'SELECT session_id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
+            [userId]
+        );
+        let sessionId = null;
+        if (Array.isArray(sessionsRows) && sessionsRows.length > 0) {
+            sessionId = sessionsRows[0].session_id;
+        } else {
+            sessionId = `sess_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+            await pool.execute(
+                'INSERT INTO sessions (session_id, user_id) VALUES (?, ?)',
+                [sessionId, userId]
+            );
+        }
+        return res.json({ ok: true, userId, sessionId });
+    } catch (e) {
+        console.error('❌ /auth/session error:', e);
+        return res.status(500).json({ error: 'auth_session_failed', details: e.message });
+    }
+});
+
 // File operations - now fully MySQL-based
 app.get('/files', async (req, res) => {
     try {
@@ -236,6 +281,34 @@ app.post('/folders/create', async (req, res) => {
     }
 });
 
+// Delete folder recursively: remove all DB files with prefix and delete from workspace
+app.post('/folders/delete', async (req, res) => {
+    try {
+        const { folderPath } = req.body;
+        const sessionId = req.headers['x-session-id'];
+        if (!folderPath || !sessionId) {
+            return res.status(400).json({ error: 'folderPath and sessionId required' });
+        }
+        const files = await listFilesBySession(sessionId);
+        const toDelete = files.filter(f => f.filename.startsWith(folderPath + '/'));
+        for (const f of toDelete) {
+            await deleteFileByName({ sessionId, filename: f.filename });
+        }
+        // Remove placeholder if present
+        await deleteFileByName({ sessionId, filename: path.join(folderPath, '.folder') });
+        // Remove on disk
+        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const fullFolder = path.join(sessionWorkspaceDir, folderPath);
+        if (fs.existsSync(fullFolder)) {
+            fs.rmSync(fullFolder, { recursive: true, force: true });
+        }
+        return res.json({ ok: true, deleted: toDelete.length });
+    } catch (error) {
+        console.error('❌ Error in /folders/delete:', error);
+        return res.status(500).json({ error: 'server_error' });
+    }
+});
+
 // Delete file endpoint
 app.delete('/files/:filename', async (req, res) => {
     try {
@@ -246,8 +319,13 @@ app.delete('/files/:filename', async (req, res) => {
             return res.status(400).json({ error: 'filename and sessionId required' });
         }
         
-        // For now, we'll just return success since MySQL doesn't have a direct delete by filename
-        // In a real implementation, you'd delete the file from the database
+        await deleteFileByName({ sessionId, filename });
+        // Also remove from session workspace
+        try {
+            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            const fullPath = path.join(sessionWorkspaceDir, filename);
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        } catch {}
         res.json({ ok: true });
     } catch (error) {
         console.error('❌ Error in /files/delete:', error);

@@ -169,6 +169,14 @@ export async function listFilesBySession(sessionId) {
   return rows
 }
 
+export async function deleteFileByName({ sessionId, filename }) {
+  const pool = await getPool()
+  await pool.execute(
+    'DELETE FROM files WHERE session_id = ? AND filename = ? LIMIT 1',
+    [sessionId, filename]
+  )
+}
+
 export async function deleteSession(sessionId) {
   const pool = await getPool()
   const conn = await pool.getConnection()
