@@ -79,10 +79,15 @@ export async function initSchema() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       CONSTRAINT fk_files_session FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+      UNIQUE KEY unique_session_filename (session_id, filename),
       INDEX idx_files_session (session_id),
       INDEX idx_files_name (filename)
     ) ENGINE=InnoDB;`)
     console.log('✅ MySQL: Files table created');
+    
+    // Clean up any duplicate files that might exist
+    await cleanupDuplicateFiles(pool);
+    
     console.log('✅ MySQL: Database schema initialized successfully');
   } catch (error) {
     console.error('❌ MySQL: Schema initialization failed:', error);
@@ -142,10 +147,16 @@ export async function upsertUserAndCreateSession({ googleId, email }) {
 
 export async function saveFile({ sessionId, filename, content }) {
   const pool = await getPool()
-  await pool.execute(
-    'INSERT INTO files (session_id, filename, content) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE content=VALUES(content)',
-    [sessionId, filename, Buffer.from(content)]
-  )
+  try {
+    await pool.execute(
+      'INSERT INTO files (session_id, filename, content) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE content=VALUES(content), updated_at=CURRENT_TIMESTAMP',
+      [sessionId, filename, Buffer.from(content)]
+    )
+    console.log('✅ MySQL: File saved/updated:', { sessionId, filename, contentLength: content.length })
+  } catch (error) {
+    console.error('❌ MySQL: Error saving file:', error)
+    throw error
+  }
 }
 
 export async function readFileByName({ sessionId, filename }) {
@@ -254,5 +265,29 @@ export async function cleanupExpiredSessions(maxAgeHours = 24) {
     throw e
   } finally {
     conn.release()
+  }
+}
+
+export async function cleanupDuplicateFiles(pool) {
+  try {
+    console.log('🧹 MySQL: Cleaning up duplicate files...')
+    
+    // Find and remove duplicate files, keeping the most recent one
+    const [duplicates] = await pool.execute(`
+      DELETE f1 FROM files f1
+      INNER JOIN files f2 
+      WHERE f1.file_id < f2.file_id 
+      AND f1.session_id = f2.session_id 
+      AND f1.filename = f2.filename
+    `)
+    
+    if (duplicates.affectedRows > 0) {
+      console.log(`🧹 MySQL: Cleaned up ${duplicates.affectedRows} duplicate files`)
+    } else {
+      console.log('ℹ️ MySQL: No duplicate files found')
+    }
+  } catch (error) {
+    console.error('⚠️ MySQL: Error cleaning up duplicates:', error.message)
+    // Don't throw - this is cleanup, not critical
   }
 }
