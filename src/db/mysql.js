@@ -133,13 +133,27 @@ export async function upsertUserAndCreateSession({ googleId, email }) {
       console.log('🗄️ MySQL: Created new user:', userId)
     }
 
-    const sessionId = `sess_${Math.random().toString(36).slice(2)}_${Date.now()}`
-    console.log('🗄️ MySQL: Creating session:', sessionId)
-    await conn.execute(
-      'INSERT INTO sessions (session_id, user_id) VALUES (?, ?)',
-      [sessionId, userId]
+    // Check if user already has a permanent session
+    const [existingSessions] = await conn.execute(
+      'SELECT session_id FROM sessions WHERE user_id = ? LIMIT 1',
+      [userId]
     )
-    console.log('🗄️ MySQL: Session created successfully')
+    
+    let sessionId
+    if (Array.isArray(existingSessions) && existingSessions.length > 0) {
+      // Reuse existing permanent session
+      sessionId = existingSessions[0].session_id
+      console.log('🗄️ MySQL: Reusing existing permanent session:', sessionId)
+    } else {
+      // Create new permanent session for new user
+      sessionId = `perm_${userId}_${Date.now()}`
+      console.log('🗄️ MySQL: Creating new permanent session:', sessionId)
+      await conn.execute(
+        'INSERT INTO sessions (session_id, user_id) VALUES (?, ?)',
+        [sessionId, userId]
+      )
+      console.log('🗄️ MySQL: Permanent session created successfully')
+    }
 
     await conn.commit()
     console.log('🗄️ MySQL: Transaction committed')
@@ -248,44 +262,10 @@ export async function getSessionInfo(sessionId) {
   return null
 }
 
+// Sessions are now permanent - no cleanup needed
 export async function cleanupExpiredSessions(maxAgeHours = 24) {
-  const pool = await getPool()
-  const conn = await pool.getConnection()
-  try {
-    await conn.beginTransaction()
-    
-    // Find expired sessions
-    const [expiredSessions] = await conn.execute(
-      'SELECT session_id FROM sessions WHERE created_at < DATE_SUB(NOW(), INTERVAL ? HOUR)',
-      [maxAgeHours]
-    )
-    
-    if (expiredSessions.length > 0) {
-      const sessionIds = expiredSessions.map(row => row.session_id)
-      
-      // Delete files for expired sessions
-      await conn.execute(
-        'DELETE FROM files WHERE session_id IN (?)',
-        [sessionIds]
-      )
-      
-      // Delete expired sessions
-      await conn.execute(
-        'DELETE FROM sessions WHERE session_id IN (?)',
-        [sessionIds]
-      )
-      
-      console.log(`🧹 Cleaned up ${expiredSessions.length} expired sessions`)
-    }
-    
-    await conn.commit()
-    return expiredSessions.length
-  } catch (e) {
-    await conn.rollback()
-    throw e
-  } finally {
-    conn.release()
-  }
+  console.log('ℹ️ MySQL: Sessions are permanent - no cleanup needed');
+  return 0;
 }
 
 export async function cleanupDuplicateFiles(pool) {
@@ -309,5 +289,32 @@ export async function cleanupDuplicateFiles(pool) {
   } catch (error) {
     console.error('⚠️ MySQL: Error cleaning up duplicates:', error.message)
     // Don't throw - this is cleanup, not critical
+  }
+}
+
+export async function getUserSessionByGoogleAccount({ googleId, email }) {
+  const pool = await getPool()
+  try {
+    const [users] = await pool.execute(
+      'SELECT u.id, u.google_id, u.email, s.session_id FROM users u LEFT JOIN sessions s ON u.id = s.user_id WHERE u.google_id = ? OR u.email = ? LIMIT 1',
+      [googleId || null, email || null]
+    )
+    
+    if (Array.isArray(users) && users.length > 0) {
+      const user = users[0]
+      if (user.session_id) {
+        console.log('✅ MySQL: Found existing session for user:', { userId: user.id, sessionId: user.session_id })
+        return { userId: user.id, sessionId: user.session_id }
+      } else {
+        console.log('⚠️ MySQL: User exists but no session found:', { userId: user.id })
+        return null
+      }
+    }
+    
+    console.log('ℹ️ MySQL: No user found for:', { googleId, email })
+    return null
+  } catch (error) {
+    console.error('❌ MySQL: Error getting user session:', error)
+    throw error
   }
 }

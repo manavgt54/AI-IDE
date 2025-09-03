@@ -6,7 +6,7 @@ import fs from 'fs';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
-import { initSchema, upsertUserAndCreateSession, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName } from './src/db/mysql.js';
+import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName } from './src/db/mysql.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -140,38 +140,18 @@ app.post('/auth/session', async (req, res) => {
         if (!googleId && !email) {
             return res.status(400).json({ error: 'googleId or email required' });
         }
-        const pool = await getPool();
-        // Find or create user
-        let userId = null;
-        const [users] = await pool.execute(
-            'SELECT id FROM users WHERE google_id = ? OR email = ? LIMIT 1',
-            [googleId || null, email || null]
-        );
-        if (Array.isArray(users) && users.length > 0) {
-            userId = users[0].id;
+        // First try to get existing permanent session
+        const existingSession = await getUserSessionByGoogleAccount({ googleId, email });
+        
+        if (existingSession) {
+            console.log('✅ Reusing existing permanent session for user:', existingSession.sessionId);
+            return res.json({ ok: true, userId: existingSession.userId, sessionId: existingSession.sessionId });
         } else {
-            const [r] = await pool.execute(
-                'INSERT INTO users (google_id, email) VALUES (?, ?)',
-                [googleId || null, email || null]
-            );
-            userId = r.insertId;
+            // Create new permanent session if none exists
+            console.log('🆕 Creating new permanent session for user');
+            const result = await upsertUserAndCreateSession({ googleId, email });
+            return res.json({ ok: true, userId: result.userId, sessionId: result.sessionId });
         }
-        // Find latest session for user
-        const [sessionsRows] = await pool.execute(
-            'SELECT session_id FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
-            [userId]
-        );
-        let sessionId = null;
-        if (Array.isArray(sessionsRows) && sessionsRows.length > 0) {
-            sessionId = sessionsRows[0].session_id;
-        } else {
-            sessionId = `sess_${Math.random().toString(36).slice(2)}_${Date.now()}`;
-            await pool.execute(
-                'INSERT INTO sessions (session_id, user_id) VALUES (?, ?)',
-                [sessionId, userId]
-            );
-        }
-        return res.json({ ok: true, userId, sessionId });
     } catch (e) {
         console.error('❌ /auth/session error:', e);
         return res.status(500).json({ error: 'auth_session_failed', details: e.message });
