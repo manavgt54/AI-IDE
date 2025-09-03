@@ -144,15 +144,13 @@ app.get('/files', async (req, res) => {
         // Get files from MySQL database for this session
         try {
             const files = await listFilesBySession(sessionId);
-            
-            const fileNodes = files.map(row => ({
-                name: row.filename,
-                type: 'file',
+            // Return a flat list of filenames; frontend will build the tree
+            const fileList = files.map(row => ({
+                filename: row.filename,
                 created: row.created_at,
                 modified: row.updated_at
             }));
-            
-            res.json(fileNodes);
+            res.json({ files: fileList });
         } catch (dbError) {
             console.error('❌ Database error in /files:', dbError);
             res.status(500).json({ error: 'database_error', details: dbError.message });
@@ -179,7 +177,7 @@ app.post('/files/open', async (req, res) => {
             return res.status(404).json({ error: 'file_not_found' });
         }
         
-        res.json({ content });
+        res.json({ path: filename, content });
     } catch (error) {
         console.error('❌ Error in /files/open:', error);
         res.status(500).json({ error: 'server_error' });
@@ -197,10 +195,44 @@ app.post('/files/save', async (req, res) => {
         }
         
         await saveFile({ sessionId, filename, content });
+        // Also write to session workspace so terminal sees latest content immediately
+        try {
+            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            const fullPath = path.join(sessionWorkspaceDir, filename);
+            fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+            fs.writeFileSync(fullPath, content);
+        } catch (fsErr) {
+            console.error('⚠️ Failed to write file to session workspace:', fsErr);
+        }
         res.json({ ok: true });
     } catch (error) {
         console.error('❌ Error in /files/save:', error);
         res.status(500).json({ error: 'server_error' });
+    }
+});
+
+// Create folder endpoint - stores a placeholder record and creates directory on disk
+app.post('/folders/create', async (req, res) => {
+    try {
+        const { folderPath } = req.body;
+        const sessionId = req.headers['x-session-id'];
+        if (!folderPath || !sessionId) {
+            return res.status(400).json({ error: 'folderPath and sessionId required' });
+        }
+
+        // Save a placeholder to represent the folder in DB
+        const placeholder = path.join(folderPath, '.folder');
+        await saveFile({ sessionId, filename: placeholder, content: '' });
+
+        // Ensure directory exists in the session workspace for terminal access
+        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const fullFolderPath = path.join(sessionWorkspaceDir, folderPath);
+        fs.mkdirSync(fullFolderPath, { recursive: true });
+
+        return res.json({ ok: true });
+    } catch (error) {
+        console.error('❌ Error in /folders/create:', error);
+        return res.status(500).json({ error: 'server_error' });
     }
 });
 
@@ -444,53 +476,8 @@ wss.on('connection', (ws) => {
             if (sessions.has(sessionId)) {
                 const session = sessions.get(sessionId);
                 if (session.ptyProcess && session.ptyReady) {
-                    // Block dangerous commands that could access system files
-                    const dangerousCommands = [
-                        'cd /app',
-                        'cd /',
-                        'cd /root',
-                        'cd /home',
-                        'cd /etc',
-                        'cd /var',
-                        'cd /usr',
-                        'cd /bin',
-                        'cd /sbin',
-                        'cd /opt',
-                        'cd /tmp',
-                        'cd /dev',
-                        'cd /proc',
-                        'cd /sys',
-                        'ls /app',
-                        'ls /',
-                        'ls /root',
-                        'ls /home',
-                        'ls /etc',
-                        'ls /var',
-                        'ls /usr',
-                        'ls /bin',
-                        'ls /sbin',
-                        'ls /opt',
-                        'ls /tmp',
-                        'ls /dev',
-                        'ls /proc',
-                        'ls /sys',
-                        'cat /etc',
-                        'cat /proc',
-                        'cat /sys',
-                        'rm -rf /',
-                        'rm -rf /app',
-                        'sudo',
-                        'su',
-                        'passwd',
-                        'chmod',
-                        'chown',
-                        'mount',
-                        'umount',
-                        'fdisk',
-                        'dd',
-                        'mkfs',
-                        'fsck'
-                    ];
+                    // Only block navigating to backend root
+                    const dangerousCommands = ['cd /app'];
                     
                     const inputLower = input.toLowerCase().trim();
                     const isDangerous = dangerousCommands.some(cmd => 
