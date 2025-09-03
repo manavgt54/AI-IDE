@@ -569,6 +569,93 @@ wss.on('connection', (ws) => {
                         }));
                         return;
                     }
+
+                    // Basic session-scoped FS sync for common commands
+                    try {
+                        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                        if (!session.currentCwd) session.currentCwd = sessionWorkspaceDir;
+                        const trimmed = input.trim();
+                        const parts = trimmed.split(/\s+/);
+                        const cmd = parts[0];
+
+                        const toRel = (p) => {
+                            const resolved = path.isAbsolute(p) ? p : path.resolve(session.currentCwd || sessionWorkspaceDir, p);
+                            if (resolved.startsWith(sessionWorkspaceDir)) {
+                                return path.relative(sessionWorkspaceDir, resolved).replace(/^\\/g, '').replace(/\\/g, '/');
+                            }
+                            return null; // outside workspace -> ignore
+                        };
+
+                        // Track cd to keep a server-side cwd for DB path resolution
+                        if (cmd === 'cd' && parts.length >= 2) {
+                            const target = parts.slice(1).join(' ');
+                            const newCwdAbs = path.isAbsolute(target)
+                                ? target
+                                : path.resolve(session.currentCwd || sessionWorkspaceDir, target);
+                            if (newCwdAbs.startsWith(sessionWorkspaceDir)) {
+                                session.currentCwd = newCwdAbs;
+                            }
+                        }
+
+                        // Handle mkdir (single path)
+                        if (cmd === 'mkdir' && parts.length >= 2) {
+                            const folderArg = parts[parts.length - 1];
+                            const rel = toRel(folderArg);
+                            if (rel) {
+                                const placeholder = path.join(rel, '.folder');
+                                await saveFile({ sessionId, filename: placeholder, content: '' });
+                            }
+                        }
+
+                        // Handle touch (can accept multiple paths)
+                        if (cmd === 'touch' && parts.length >= 2) {
+                            const fileArgs = parts.slice(1);
+                            for (const f of fileArgs) {
+                                const rel = toRel(f);
+                                if (rel) {
+                                    // Delay a bit, then read actual content from disk and persist to DB
+                                    setTimeout(() => {
+                                        try {
+                                            const full = path.join(sessionWorkspaceDir, rel);
+                                            if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+                                                const content = fs.readFileSync(full, 'utf8');
+                                                saveFile({ sessionId, filename: rel, content }).catch(() => {});
+                                            } else {
+                                                // File may not exist yet; create empty entry
+                                                saveFile({ sessionId, filename: rel, content: '' }).catch(() => {});
+                                            }
+                                        } catch {}
+                                    }, 300);
+                                }
+                            }
+                        }
+
+                        // Handle rm (file) and rm -rf (folder)
+                        if (cmd === 'rm' && parts.length >= 2) {
+                            const flags = parts.slice(1, -1).join(' ');
+                            const target = parts[parts.length - 1];
+                            const rel = toRel(target);
+                            if (rel) {
+                                if (/\-r|\-rf|\-fr/.test(flags)) {
+                                    // Folder delete: remove all DB entries with prefix
+                                    try {
+                                        const files = await listFilesBySession(sessionId);
+                                        for (const row of files) {
+                                            if (row.filename.startsWith(rel + '/')) {
+                                                await deleteFileByName({ sessionId, filename: row.filename });
+                                            }
+                                        }
+                                        await deleteFileByName({ sessionId, filename: path.join(rel, '.folder') });
+                                    } catch {}
+                                } else {
+                                    // File delete
+                                    try { await deleteFileByName({ sessionId, filename: rel }); } catch {}
+                                }
+                            }
+                        }
+                    } catch (syncErr) {
+                        console.error('⚠️ Command sync error:', syncErr);
+                    }
                     
                     session.ptyProcess.write(input);
                 } else {
