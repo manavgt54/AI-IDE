@@ -71,7 +71,16 @@ export async function initSchema() {
     ) ENGINE=InnoDB;`)
     console.log('✅ MySQL: Sessions table created');
 
-    await pool.query(`CREATE TABLE IF NOT EXISTS files (
+    // Drop and recreate files table to ensure proper constraints
+    try {
+      await pool.query('DROP TABLE IF EXISTS files');
+      console.log('🗑️ MySQL: Dropped existing files table');
+    } catch (dropError) {
+      console.log('ℹ️ MySQL: No existing files table to drop');
+    }
+    
+    // Create files table with proper unique constraint
+    await pool.query(`CREATE TABLE files (
       file_id INT AUTO_INCREMENT PRIMARY KEY,
       session_id VARCHAR(64) NOT NULL,
       filename VARCHAR(512) NOT NULL,
@@ -83,7 +92,7 @@ export async function initSchema() {
       INDEX idx_files_session (session_id),
       INDEX idx_files_name (filename)
     ) ENGINE=InnoDB;`)
-    console.log('✅ MySQL: Files table created');
+    console.log('✅ MySQL: Files table recreated with proper constraints');
     
     // Clean up any duplicate files that might exist
     await cleanupDuplicateFiles(pool);
@@ -148,11 +157,22 @@ export async function upsertUserAndCreateSession({ googleId, email }) {
 export async function saveFile({ sessionId, filename, content }) {
   const pool = await getPool()
   try {
-    await pool.execute(
-      'INSERT INTO files (session_id, filename, content) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE content=VALUES(content), updated_at=CURRENT_TIMESTAMP',
-      [sessionId, filename, Buffer.from(content)]
+    // First try to update existing file
+    const [updateResult] = await pool.execute(
+      'UPDATE files SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND filename = ?',
+      [Buffer.from(content), sessionId, filename]
     )
-    console.log('✅ MySQL: File saved/updated:', { sessionId, filename, contentLength: content.length })
+    
+    // If no rows were updated, insert new file
+    if (updateResult.affectedRows === 0) {
+      await pool.execute(
+        'INSERT INTO files (session_id, filename, content) VALUES (?, ?, ?)',
+        [sessionId, filename, Buffer.from(content)]
+      )
+      console.log('✅ MySQL: File created:', { sessionId, filename, contentLength: content.length })
+    } else {
+      console.log('✅ MySQL: File updated:', { sessionId, filename, contentLength: content.length })
+    }
   } catch (error) {
     console.error('❌ MySQL: Error saving file:', error)
     throw error
