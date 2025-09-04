@@ -84,6 +84,46 @@ app.get('/', (req, res) => {
     });
 });
 
+// Debug endpoint to check session files
+app.get('/debug/files/:sessionId', async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const files = await listFilesBySession(sessionId);
+        res.json({ 
+            sessionId,
+            totalFiles: files.length,
+            files: files.map(f => ({
+                filename: f.filename,
+                created: f.created_at,
+                modified: f.updated_at
+            }))
+        });
+    } catch (error) {
+        console.error('❌ Debug files error:', error);
+        res.status(500).json({ error: 'debug_failed', details: error.message });
+    }
+});
+
+// Debug endpoint to read a specific file
+app.get('/debug/read/:sessionId/*', async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const filename = req.params[0]; // Everything after sessionId/
+        const content = await readFileByName({ sessionId, filename });
+        res.json({ 
+            sessionId,
+            filename,
+            contentLength: content ? content.length : 0,
+            content: content ? content.substring(0, 500) + (content.length > 500 ? '...' : '') : null,
+            isNull: content === null,
+            isEmpty: content === ''
+        });
+    } catch (error) {
+        console.error('❌ Debug read error:', error);
+        res.status(500).json({ error: 'debug_read_failed', details: error.message });
+    }
+});
+
 // Database test endpoint
 app.get('/test-db', async (req, res) => {
     try {
@@ -261,6 +301,25 @@ app.post('/files/save', async (req, res) => {
         }
         
         await saveFile({ sessionId, filename, content });
+        
+        // Immediately sync to session workspace for terminal access
+        try {
+            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            const filePath = path.join(sessionWorkspaceDir, filename);
+            const dirPath = path.dirname(filePath);
+            
+            // Ensure directory exists
+            if (!fs.existsSync(dirPath)) {
+                fs.mkdirSync(dirPath, { recursive: true });
+            }
+            
+            // Write file to session workspace
+            fs.writeFileSync(filePath, content);
+            console.log(`📄 Synced saved file to session workspace: ${filename}`);
+        } catch (syncError) {
+            console.error(`⚠️ Error syncing saved file ${filename}:`, syncError);
+        }
+        
         res.json({ ok: true });
     } catch (error) {
         console.error('❌ Error in /files/save:', error);
@@ -307,7 +366,27 @@ app.post('/files/upload', upload.array('files'), async (req, res) => {
             const file = filesArr[i];
             const relPath = (paths[i] || file.originalname || '').replace(/^\/+/, '').replace(/\\/g, '/');
             if (!relPath) continue;
+            
+            // Save to database
             await saveFile({ sessionId, filename: relPath, content: file.buffer });
+            
+            // Immediately sync to session workspace for terminal access
+            try {
+                const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                const filePath = path.join(sessionWorkspaceDir, relPath);
+                const dirPath = path.dirname(filePath);
+                
+                // Ensure directory exists
+                if (!fs.existsSync(dirPath)) {
+                    fs.mkdirSync(dirPath, { recursive: true });
+                }
+                
+                // Write file to session workspace
+                fs.writeFileSync(filePath, file.buffer);
+                console.log(`📄 Synced uploaded file to session workspace: ${relPath}`);
+            } catch (syncError) {
+                console.error(`⚠️ Error syncing uploaded file ${relPath}:`, syncError);
+            }
         }
 
         res.json({ ok: true, uploaded: filesArr.length });
@@ -463,7 +542,7 @@ wss.on('connection', (ws) => {
                 console.log('📁 Created session workspace:', sessionWorkspaceDir);
             }
             
-            // Create new session
+            // Create new session 
             const session = {
                 ws,
                 ptyProcess: null,
@@ -659,27 +738,30 @@ wss.on('connection', (ws) => {
                             }
                         }
 
-                        // Generalized pre-checks for common developer tools and file-based commands
-                        const precheckResult = await precheckCommand({
+                        // Comprehensive command analysis and execution
+                        const analysis = await analyzeAndExecuteCommand({
                             raw: trimmed,
                             sessionId,
                             sessionWorkspaceDir,
                             currentCwdAbs: session.currentCwd
                         });
-                        if (!precheckResult.ok) {
+                        if (!analysis.ok) {
                             ws.send(JSON.stringify({
                                 type: 'output',
-                                data: `\r\n\x1b[33m[PRECHECK]\x1b[0m ${precheckResult.message}\r\n`
+                                data: `\r\n\x1b[31m[ERROR]\x1b[0m ${analysis.message}\r\n`
                             }));
                             return;
                         }
-                        // Optional auto-cd suggested by precheck
-                        if (precheckResult.autoCd && typeof precheckResult.autoCd === 'string') {
-                            const targetAbs = path.resolve(sessionWorkspaceDir, precheckResult.autoCd);
-                            if (targetAbs.startsWith(sessionWorkspaceDir) && fs.existsSync(targetAbs)) {
+                        // Handle command actions (redirect, prepare, etc.)
+                        if (analysis.action === 'redirect') {
+                            const targetAbs = path.resolve(sessionWorkspaceDir, analysis.newCwd);
+                            if (targetAbs.startsWith(sessionWorkspaceDir)) {
                                 session.currentCwd = targetAbs;
                                 session.ptyProcess.write('cd "' + targetAbs + '"\n');
-                                ws.send(JSON.stringify({ type: 'output', data: `\r\n\x1b[36m[AUTO]\x1b[0m switched directory to ${precheckResult.autoCd}\r\n` }));
+                                ws.send(JSON.stringify({ 
+                                    type: 'output', 
+                                    data: `\r\n\x1b[36m[AUTO]\x1b[0m ${analysis.message}\r\n` 
+                                }));
                             }
                         }
 
@@ -755,173 +837,418 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Input failed' }));
         }
     }
+    
+    ws.on('close', () => {
+        console.log('🔌 WebSocket connection closed');
+        if (currentSessionId && sessions.has(currentSessionId)) {
+            const session = sessions.get(currentSessionId);
+            if (session.ptyProcess) {
+                session.ptyProcess.kill();
+            }
+            sessions.delete(currentSessionId);
+        }
+    });
 });
 
 // -------------------------
-// Command precheck utilities
+// Comprehensive Command Analysis & Execution System
 // -------------------------
-async function precheckCommand({ raw, sessionId, sessionWorkspaceDir, currentCwdAbs }) {
+
+/**
+ * Analyzes command behavior and ensures proper file synchronization
+ * This replaces the simple precheck with a comprehensive system
+ */
+async function analyzeAndExecuteCommand({ raw, sessionId, sessionWorkspaceDir, currentCwdAbs }) {
     try {
-        const tokens = raw.split(/\s+/);
-        if (tokens.length === 0) return { ok: true };
+        const tokens = raw.trim().split(/\s+/);
+        if (tokens.length === 0) return { ok: true, action: 'execute' };
+        
         const executable = tokens[0].toLowerCase();
         const args = tokens.slice(1);
+        
+        console.log('🔍 COMMAND ANALYSIS:', {
+            command: raw,
+            executable,
+            args,
+            sessionId: sessionId.substring(0, 8) + '...',
+            currentCwd: currentCwdAbs
+        });
 
-        // Load file list for this session once
-        let fileRows = [];
-        try { fileRows = await listFilesBySession(sessionId); } catch {}
-        const dbFiles = new Set((fileRows || []).map(r => String(r.filename)));
-        // Detect single top-level directory
-        const topLevelSet = new Set();
-        let hasRootFiles = false;
-        for (const row of fileRows || []) {
-            const parts = String(row.filename).split('/').filter(Boolean);
-            if (parts.length === 1) hasRootFiles = true;
-            if (parts[0]) topLevelSet.add(parts[0]);
+        // Step 1: Ensure all files are synced to workspace before command execution
+        await ensureFilesSynced(sessionId, sessionWorkspaceDir);
+        
+        // Step 2: Analyze command requirements
+        const analysis = await analyzeCommandRequirements(executable, args, sessionId, sessionWorkspaceDir, currentCwdAbs);
+        
+        // Step 3: Handle command-specific logic
+        if (analysis.action === 'block') {
+            return { ok: false, message: analysis.message };
+        } else if (analysis.action === 'redirect') {
+            return { ok: true, action: 'redirect', newCwd: analysis.newCwd, message: analysis.message };
+        } else if (analysis.action === 'prepare') {
+            // Prepare environment for command (e.g., create missing files)
+            await prepareCommandEnvironment(analysis);
         }
-        const singleTop = !hasRootFiles && topLevelSet.size === 1 ? Array.from(topLevelSet)[0] : null;
-
-        const toRelFromCwd = (argPath) => {
-            if (!argPath) return null;
-            const abs = path.isAbsolute(argPath) ? argPath : path.resolve(currentCwdAbs, argPath);
-            if (!abs.startsWith(sessionWorkspaceDir)) return null;
-            const rel = path.relative(sessionWorkspaceDir, abs).replace(/\\/g, '/');
-            return rel;
-        };
-
-        const existsRel = (relPath) => relPath && dbFiles.has(relPath);
-
-        // Define generic rules
-        const rules = [
-            // npm/pnpm/yarn
-            {
-                match: (exe) => ['npm', 'pnpm', 'yarn'].includes(exe),
-                check: () => {
-                    const rel = toRelFromCwd('package.json');
-                    if (!existsRel(rel)) {
-                        // try single-top suggestion
-                        if (singleTop && dbFiles.has(`${singleTop}/package.json`)) {
-                            return { suggestCwd: singleTop, msg: `package.json not found here. Switching to ${singleTop}/ as project root.` };
-                        }
-                        return `Expected package.json in current directory for ${executable} commands.`;
-                    }
-                    return null;
-                }
-            },
-            // node <file>
-            {
-                match: (exe) => exe === 'node',
-                check: () => {
-                    if (args.length < 1) return null;
-                    const target = toRelFromCwd(args[0]);
-                    if (target && !existsRel(target)) return `File not found: ${args[0]} (expected in workspace).`;
-                    return null;
-                }
-            },
-            // npx <tool> (usually requires package.json but allow globally too)
-            {
-                match: (exe) => exe === 'npx',
-                check: () => {
-                    const rel = toRelFromCwd('package.json');
-                    if (!existsRel(rel)) return null; // soft requirement
-                    return null;
-                }
-            },
-            // python script.py
-            {
-                match: (exe) => ['python', 'python3', 'py'].includes(exe),
-                check: () => {
-                    if (args.length < 1) return null;
-                    // Skip flags-only invocations
-                    const firstArg = args.find(a => !a.startsWith('-'));
-                    if (!firstArg) return null;
-                    const target = toRelFromCwd(firstArg);
-                    if (target && !existsRel(target)) return `File not found: ${firstArg} (expected in workspace).`;
-                    return null;
-                }
-            },
-            // pip install -r requirements.txt
-            {
-                match: (exe) => ['pip', 'pip3'].includes(exe),
-                check: () => {
-                    const idx = args.findIndex(a => a === '-r' || a === '--requirement');
-                    if (idx >= 0 && args[idx + 1]) {
-                        const reqRel = toRelFromCwd(args[idx + 1]);
-                        if (reqRel && !existsRel(reqRel)) return `Requirements file not found: ${args[idx + 1]}.`;
-                    }
-                    return null;
-                }
-            },
-            // go run <file.go>
-            {
-                match: (exe) => exe === 'go',
-                check: () => {
-                    if (args[0] === 'run' && args[1]) {
-                        const target = toRelFromCwd(args[1]);
-                        if (target && !existsRel(target)) return `File not found: ${args[1]}.`;
-                    }
-                    return null;
-                }
-            },
-            // cargo build/run -> Cargo.toml
-            {
-                match: (exe) => exe === 'cargo',
-                check: () => {
-                    const rel = toRelFromCwd('Cargo.toml');
-                    if (!existsRel(rel)) return `Expected Cargo.toml in current directory for cargo commands.`;
-                    return null;
-                }
-            },
-            // javac/java <file>
-            {
-                match: (exe) => exe === 'javac' || exe === 'java',
-                check: () => {
-                    const arg = args.find(a => /\.java$/i.test(a));
-                    if (arg) {
-                        const target = toRelFromCwd(arg);
-                        if (target && !existsRel(target)) return `File not found: ${arg}.`;
-                    }
-                    return null;
-                }
-            },
-            // gcc/g++ <file>
-            {
-                match: (exe) => exe === 'gcc' || exe === 'g++',
-                check: () => {
-                    const src = args.find(a => /\.(c|cc|cpp|cxx|h|hpp)$/i.test(a));
-                    if (src) {
-                        const target = toRelFromCwd(src);
-                        if (target && !existsRel(target)) return `Source file not found: ${src}.`;
-                    }
-                    return null;
-                }
-            }
-        ];
-
-        for (const rule of rules) {
-            if (rule.match(executable)) {
-                const res = rule.check();
-                if (typeof res === 'string' && res) return { ok: false, message: res };
-                if (res && typeof res === 'object' && res.suggestCwd) {
-                    return { ok: true, autoCd: res.suggestCwd };
-                }
-            }
-        }
-
-        // Generic safety: if command includes a path argument, ensure it's inside workspace
-        const pathArg = args.find(a => /[\\/]/.test(a) && !a.startsWith('-'));
-        if (pathArg) {
-            const rel = toRelFromCwd(pathArg);
-            if (rel === null) {
-                return { ok: false, message: `Access denied: Path is outside your workspace: ${pathArg}` };
-            }
-        }
-
-        return { ok: true };
-    } catch (e) {
-        // On error, do not block the command
-        return { ok: true };
+        
+        return { ok: true, action: 'execute' };
+        
+    } catch (error) {
+        console.error('❌ Command analysis error:', error);
+        return { ok: true, action: 'execute' }; // Allow command to proceed on analysis error
     }
+}
+
+/**
+ * Ensures all database files are synced to session workspace
+ */
+async function ensureFilesSynced(sessionId, sessionWorkspaceDir) {
+    try {
+        const dbFiles = await listFilesBySession(sessionId);
+        
+        for (const fileRow of dbFiles) {
+            const filePath = path.join(sessionWorkspaceDir, fileRow.filename);
+            const dirPath = path.dirname(filePath);
+            
+            // Check if file exists and is up to date
+            if (!fs.existsSync(filePath)) {
+                // File doesn't exist in workspace, sync it
+                const content = await readFileByName({ sessionId, filename: fileRow.filename });
+                if (content) {
+                    // Ensure directory exists
+                    if (!fs.existsSync(dirPath)) {
+                        fs.mkdirSync(dirPath, { recursive: true });
+                    }
+                    // Write file to workspace
+                    fs.writeFileSync(filePath, content);
+                    console.log(`📄 Synced file to workspace: ${fileRow.filename}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('⚠️ Error syncing files:', error);
+    }
+}
+
+/**
+ * Analyzes command requirements and determines action needed
+ */
+async function analyzeCommandRequirements(executable, args, sessionId, sessionWorkspaceDir, currentCwdAbs) {
+    const dbFiles = await listFilesBySession(sessionId);
+    const fileSet = new Set(dbFiles.map(r => String(r.filename)));
+    
+    // Helper functions
+    const resolvePath = (argPath) => {
+        if (!argPath) return null;
+        const abs = path.isAbsolute(argPath) ? argPath : path.resolve(currentCwdAbs, argPath);
+        if (!abs.startsWith(sessionWorkspaceDir)) return null;
+        return path.relative(sessionWorkspaceDir, abs).replace(/\\/g, '/');
+    };
+    
+    const fileExists = (relPath) => relPath && fileSet.has(relPath);
+    const fileExistsInWorkspace = (relPath) => {
+        if (!relPath) return false;
+        const fullPath = path.join(sessionWorkspaceDir, relPath);
+        return fs.existsSync(fullPath);
+    };
+    
+    // Detect project structure
+    const projectRoot = detectProjectRoot(dbFiles, currentCwdAbs, sessionWorkspaceDir);
+    
+    // Command-specific analysis
+    switch (executable) {
+        case 'npm':
+        case 'pnpm':
+        case 'yarn':
+            return analyzeNodeCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot);
+            
+        case 'node':
+            return analyzeNodeExecution(args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        case 'npx':
+            return analyzeNpxCommand(args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot);
+            
+        case 'python':
+        case 'python3':
+        case 'py':
+            return analyzePythonCommand(args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        case 'pip':
+        case 'pip3':
+            return analyzePipCommand(args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        case 'git':
+            return analyzeGitCommand(args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot);
+            
+        case 'go':
+            return analyzeGoCommand(args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        case 'cargo':
+            return analyzeCargoCommand(args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        case 'javac':
+        case 'java':
+            return analyzeJavaCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        case 'gcc':
+        case 'g++':
+            return analyzeCppCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace);
+            
+        default:
+            // Generic analysis for unknown commands
+            return analyzeGenericCommand(args, resolvePath, sessionWorkspaceDir);
+    }
+}
+
+/**
+ * Detects the project root directory based on file structure
+ */
+function detectProjectRoot(dbFiles, currentCwdAbs, sessionWorkspaceDir) {
+    const fileSet = new Set(dbFiles.map(r => String(r.filename)));
+    
+    // Check for common project indicators
+    const projectIndicators = [
+        'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+        'requirements.txt', 'Pipfile', 'pyproject.toml',
+        'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle',
+        '.git', 'README.md', 'Makefile'
+    ];
+    
+    // Find directories containing project indicators
+    const projectDirs = new Set();
+    for (const indicator of projectIndicators) {
+        if (fileSet.has(indicator)) {
+            projectDirs.add(''); // Root directory
+        }
+        for (const filename of fileSet) {
+            if (filename.endsWith(`/${indicator}`)) {
+                const dir = path.dirname(filename);
+                if (dir !== '.') projectDirs.add(dir);
+            }
+        }
+    }
+    
+    // If only one project directory found, suggest it
+    if (projectDirs.size === 1) {
+        const projectDir = Array.from(projectDirs)[0];
+        if (projectDir && projectDir !== '') {
+            return projectDir;
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Analyzes Node.js package manager commands
+ */
+function analyzeNodeCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot) {
+    const packageJsonPath = resolvePath('package.json');
+    
+    if (!fileExists(packageJsonPath)) {
+        if (projectRoot && fileExists(`${projectRoot}/package.json`)) {
+            return {
+                action: 'redirect',
+                newCwd: projectRoot,
+                message: `package.json not found in current directory. Switching to ${projectRoot}/ where package.json exists.`
+            };
+        }
+        
+        // For install commands, allow them to create package.json
+        if (['install', 'i', 'add', 'remove', 'uninstall'].includes(args[0])) {
+            return { action: 'execute' };
+        }
+        
+        return {
+            action: 'block',
+            message: `package.json not found. ${executable} commands require a package.json file.`
+        };
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes Node.js execution commands
+ */
+function analyzeNodeExecution(args, resolvePath, fileExists, fileExistsInWorkspace) {
+    if (args.length < 1) return { action: 'execute' };
+    
+    const scriptPath = resolvePath(args[0]);
+    if (scriptPath && !fileExists(scriptPath)) {
+        return {
+            action: 'block',
+            message: `File not found: ${args[0]}. Make sure the file exists in your workspace.`
+        };
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes npx commands
+ */
+function analyzeNpxCommand(args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot) {
+    // npx can run global tools or local tools
+    // If it's trying to run a local tool, check for package.json
+    if (args.length > 0) {
+        const tool = args[0];
+        const packageJsonPath = resolvePath('package.json');
+        
+        // Check if it's a local tool (usually in node_modules/.bin)
+        if (fileExists(packageJsonPath)) {
+            return { action: 'execute' };
+        }
+        
+        // For global tools, allow execution
+        return { action: 'execute' };
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes Python commands
+ */
+function analyzePythonCommand(args, resolvePath, fileExists, fileExistsInWorkspace) {
+    if (args.length < 1) return { action: 'execute' };
+    
+    // Find the first non-flag argument (the script to run)
+    const scriptArg = args.find(arg => !arg.startsWith('-'));
+    if (scriptArg) {
+        const scriptPath = resolvePath(scriptArg);
+        if (scriptPath && !fileExists(scriptPath)) {
+            return {
+                action: 'block',
+                message: `Python script not found: ${scriptArg}. Make sure the file exists in your workspace.`
+            };
+        }
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes pip commands
+ */
+function analyzePipCommand(args, resolvePath, fileExists, fileExistsInWorkspace) {
+    // Check for requirements file
+    const reqIndex = args.findIndex(arg => arg === '-r' || arg === '--requirement');
+    if (reqIndex >= 0 && args[reqIndex + 1]) {
+        const reqPath = resolvePath(args[reqIndex + 1]);
+        if (reqPath && !fileExists(reqPath)) {
+            return {
+                action: 'block',
+                message: `Requirements file not found: ${args[reqIndex + 1]}.`
+            };
+        }
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes Git commands
+ */
+function analyzeGitCommand(args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot) {
+    // Git commands are generally safe to run
+    // Just ensure we're in a reasonable directory
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes Go commands
+ */
+function analyzeGoCommand(args, resolvePath, fileExists, fileExistsInWorkspace) {
+    if (args[0] === 'run' && args[1]) {
+        const goFile = resolvePath(args[1]);
+        if (goFile && !fileExists(goFile)) {
+            return {
+                action: 'block',
+                message: `Go file not found: ${args[1]}.`
+            };
+        }
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes Cargo commands
+ */
+function analyzeCargoCommand(args, resolvePath, fileExists, fileExistsInWorkspace) {
+    const cargoTomlPath = resolvePath('Cargo.toml');
+    if (!fileExists(cargoTomlPath)) {
+        return {
+            action: 'block',
+            message: 'Cargo.toml not found. Cargo commands require a Rust project.'
+        };
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes Java commands
+ */
+function analyzeJavaCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace) {
+    const javaFile = args.find(arg => arg.endsWith('.java'));
+    if (javaFile) {
+        const javaPath = resolvePath(javaFile);
+        if (javaPath && !fileExists(javaPath)) {
+            return {
+                action: 'block',
+                message: `Java file not found: ${javaFile}.`
+            };
+        }
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes C/C++ commands
+ */
+function analyzeCppCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace) {
+    const sourceFile = args.find(arg => /\.(c|cc|cpp|cxx|h|hpp)$/i.test(arg));
+    if (sourceFile) {
+        const sourcePath = resolvePath(sourceFile);
+        if (sourcePath && !fileExists(sourcePath)) {
+            return {
+                action: 'block',
+                message: `Source file not found: ${sourceFile}.`
+            };
+        }
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Analyzes generic commands
+ */
+function analyzeGenericCommand(args, resolvePath, sessionWorkspaceDir) {
+    // For generic commands, just check if any path arguments are outside workspace
+    const pathArgs = args.filter(arg => /[\\/]/.test(arg) && !arg.startsWith('-'));
+    
+    for (const pathArg of pathArgs) {
+        const resolved = resolvePath(pathArg);
+        if (resolved === null) {
+            return {
+                action: 'block',
+                message: `Access denied: Path is outside your workspace: ${pathArg}`
+            };
+        }
+    }
+    
+    return { action: 'execute' };
+}
+
+/**
+ * Prepares environment for command execution
+ */
+async function prepareCommandEnvironment(analysis) {
+    // This can be extended to create missing files, set up environment variables, etc.
+    console.log('🔧 Preparing command environment:', analysis);
 }
 
 // Graceful shutdown
@@ -958,9 +1285,47 @@ function shutdown() {
     });
 }
 
+// Auto-sync files from DB to session workspace every 10 seconds
+setInterval(async () => {
+    try {
+        for (const [sessionId, session] of sessions.entries()) {
+            if (session.ptyReady && session.currentCwd) {
+                const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                
+                // Get all files from database for this session
+                const dbFiles = await listFilesBySession(sessionId);
+                
+                // Sync each file to the session workspace
+                for (const fileRow of dbFiles) {
+                    try {
+                        const content = await readFileByName({ sessionId, filename: fileRow.filename });
+                        if (content) {
+                            const filePath = path.join(sessionWorkspaceDir, fileRow.filename);
+                            const dirPath = path.dirname(filePath);
+                            
+                            // Ensure directory exists
+                            if (!fs.existsSync(dirPath)) {
+                                fs.mkdirSync(dirPath, { recursive: true });
+                            }
+                            
+                            // Write file to session workspace
+                            fs.writeFileSync(filePath, content);
+                        }
+                    } catch (error) {
+                        console.error(`⚠️ Error syncing file ${fileRow.filename} for session ${sessionId}:`, error);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('⚠️ Error in auto-sync:', error);
+    }
+}, 10000); // Every 10 seconds
+
 // Start server
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🔌 WebSocket server ready`);
     console.log(`🗄️ MySQL database integration active`);
+    console.log(`🔄 Auto-sync enabled (10s interval)`);
 });

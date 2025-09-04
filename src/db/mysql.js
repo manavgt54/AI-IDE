@@ -200,8 +200,22 @@ export async function readFileByName({ sessionId, filename }) {
     [sessionId, filename]
   )
   if (Array.isArray(rows) && rows.length > 0) {
-    return Buffer.from(rows[0].content || '').toString()
+    const content = rows[0].content
+    if (content === null || content === undefined) {
+      console.log('⚠️ MySQL: File content is null/undefined for:', filename)
+      return ''
+    }
+    // Handle both Buffer and string content
+    if (Buffer.isBuffer(content)) {
+      return content.toString('utf8')
+    } else if (typeof content === 'string') {
+      return content
+    } else {
+      console.log('⚠️ MySQL: Unexpected content type for:', filename, typeof content)
+      return String(content)
+    }
   }
+  console.log('⚠️ MySQL: File not found:', filename)
   return null
 }
 
