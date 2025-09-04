@@ -6,7 +6,7 @@ import fs from 'fs';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
-import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName } from './src/db/mysql.js';
+import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo } from './src/db/mysql.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -155,6 +155,38 @@ app.post('/auth/session', async (req, res) => {
     } catch (e) {
         console.error('❌ /auth/session error:', e);
         return res.status(500).json({ error: 'auth_session_failed', details: e.message });
+    }
+});
+
+// Validate an existing sessionId, and if it's missing in memory allow backend to recreate in-memory state
+app.post('/auth/session/validate', async (req, res) => {
+    try {
+        const { sessionId, googleId, email } = req.body || {};
+        if (!sessionId && !googleId && !email) {
+            return res.status(400).json({ error: 'sessionId or google identity required' });
+        }
+
+        // 1) If sessionId provided, check it exists in DB
+        if (sessionId) {
+            const info = await getSessionInfo(sessionId);
+            if (info) {
+                return res.json({ ok: true, sessionId: info.session_id, userId: info.user_id });
+            }
+        }
+
+        // 2) Fallback by Google identity to recover the user's permanent session
+        if (googleId || email) {
+            const existing = await getUserSessionByGoogleAccount({ googleId, email });
+            if (existing) {
+                return res.json({ ok: true, sessionId: existing.sessionId, userId: existing.userId });
+            }
+        }
+
+        // 3) Nothing found
+        return res.status(404).json({ ok: false, error: 'session_not_found' });
+    } catch (e) {
+        console.error('❌ /auth/session/validate error:', e);
+        return res.status(500).json({ error: 'validate_failed', details: e.message });
     }
 });
 
