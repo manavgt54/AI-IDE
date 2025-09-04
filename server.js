@@ -482,9 +482,35 @@ wss.on('connection', (ws) => {
                     const content = await readFileByName({ sessionId, filename: file.filename });
                     if (content) {
                         const filePath = path.join(sessionWorkspaceDir, file.filename);
+                        fs.mkdirSync(path.dirname(filePath), { recursive: true });
                         fs.writeFileSync(filePath, content);
                         console.log('📄 Synced file to session workspace:', file.filename);
                     }
+                }
+                // Auto-select project root: if there is exactly one top-level folder and no files at root, cd into it
+                try {
+                    const topLevels = new Set();
+                    let hasRootFiles = false;
+                    for (const row of files) {
+                        const parts = String(row.filename).split('/').filter(Boolean);
+                        if (parts.length === 0) continue;
+                        if (parts.length === 1) {
+                            // a file directly at root
+                            hasRootFiles = true;
+                        }
+                        topLevels.add(parts[0]);
+                    }
+                    if (!hasRootFiles && topLevels.size === 1) {
+                        const only = Array.from(topLevels)[0];
+                        const newCwd = path.join(sessionWorkspaceDir, only);
+                        if (fs.existsSync(newCwd) && fs.statSync(newCwd).isDirectory()) {
+                            session.currentCwd = newCwd;
+                            // Update PTY working directory
+                            session.ptyProcess?.write('cd "' + newCwd + '"\n');
+                        }
+                    }
+                } catch (autocdErr) {
+                    console.log('ℹ️ Auto-cd detection skipped:', autocdErr?.message);
                 }
             } catch (syncError) {
                 console.error('⚠️ Error syncing files to session workspace:', syncError);
@@ -647,6 +673,15 @@ wss.on('connection', (ws) => {
                             }));
                             return;
                         }
+                        // Optional auto-cd suggested by precheck
+                        if (precheckResult.autoCd && typeof precheckResult.autoCd === 'string') {
+                            const targetAbs = path.resolve(sessionWorkspaceDir, precheckResult.autoCd);
+                            if (targetAbs.startsWith(sessionWorkspaceDir) && fs.existsSync(targetAbs)) {
+                                session.currentCwd = targetAbs;
+                                session.ptyProcess.write('cd "' + targetAbs + '"\n');
+                                ws.send(JSON.stringify({ type: 'output', data: `\r\n\x1b[36m[AUTO]\x1b[0m switched directory to ${precheckResult.autoCd}\r\n` }));
+                            }
+                        }
 
                         // Handle mkdir (single path)
                         if (cmd === 'mkdir' && parts.length >= 2) {
@@ -736,6 +771,15 @@ async function precheckCommand({ raw, sessionId, sessionWorkspaceDir, currentCwd
         let fileRows = [];
         try { fileRows = await listFilesBySession(sessionId); } catch {}
         const dbFiles = new Set((fileRows || []).map(r => String(r.filename)));
+        // Detect single top-level directory
+        const topLevelSet = new Set();
+        let hasRootFiles = false;
+        for (const row of fileRows || []) {
+            const parts = String(row.filename).split('/').filter(Boolean);
+            if (parts.length === 1) hasRootFiles = true;
+            if (parts[0]) topLevelSet.add(parts[0]);
+        }
+        const singleTop = !hasRootFiles && topLevelSet.size === 1 ? Array.from(topLevelSet)[0] : null;
 
         const toRelFromCwd = (argPath) => {
             if (!argPath) return null;
@@ -755,6 +799,10 @@ async function precheckCommand({ raw, sessionId, sessionWorkspaceDir, currentCwd
                 check: () => {
                     const rel = toRelFromCwd('package.json');
                     if (!existsRel(rel)) {
+                        // try single-top suggestion
+                        if (singleTop && dbFiles.has(`${singleTop}/package.json`)) {
+                            return { suggestCwd: singleTop, msg: `package.json not found here. Switching to ${singleTop}/ as project root.` };
+                        }
                         return `Expected package.json in current directory for ${executable} commands.`;
                     }
                     return null;
@@ -852,8 +900,11 @@ async function precheckCommand({ raw, sessionId, sessionWorkspaceDir, currentCwd
 
         for (const rule of rules) {
             if (rule.match(executable)) {
-                const msg = rule.check();
-                if (msg) return { ok: false, message: msg };
+                const res = rule.check();
+                if (typeof res === 'string' && res) return { ok: false, message: res };
+                if (res && typeof res === 'object' && res.suggestCwd) {
+                    return { ok: true, autoCd: res.suggestCwd };
+                }
             }
         }
 
