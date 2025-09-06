@@ -167,7 +167,7 @@ app.post('/auth/google', async (req, res) => {
         }
         console.log('📝 Creating user and session for:', { googleId, email });
         
-        const { userId, sessionId } = await upsertUserAndCreateSession({ googleId, email });
+        const { userId, sessionId } = await upsertUserAndCreateSession({ googleId, email, provider: 'google' });
         console.log('✅ User and session created:', { userId, sessionId });
         return res.json({ ok: true, userId, sessionId });
     } catch (e) {
@@ -192,12 +192,86 @@ app.post('/auth/session', async (req, res) => {
         } else {
             // Create new permanent session if none exists
             console.log('🆕 Creating new permanent session for user');
-            const result = await upsertUserAndCreateSession({ googleId, email });
+            const result = await upsertUserAndCreateSession({ googleId, email, provider: 'google' });
             return res.json({ ok: true, userId: result.userId, sessionId: result.sessionId });
         }
     } catch (e) {
         console.error('❌ /auth/session error:', e);
         return res.status(500).json({ error: 'auth_session_failed', details: e.message });
+    }
+});
+
+// GitHub OAuth callback
+app.get('/auth/github/callback', async (req, res) => {
+    try {
+        const { code, state } = req.query;
+        
+        if (!code) {
+            return res.status(400).json({ error: 'Authorization code required' });
+        }
+
+        // Exchange code for access token
+        const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                client_id: process.env.GITHUB_CLIENT_ID || 'Ov23liJ8QZqJqJqJqJqJq',
+                client_secret: process.env.GITHUB_CLIENT_SECRET || 'your_github_client_secret',
+                code: code,
+                state: state
+            })
+        });
+
+        const tokenData = await tokenResponse.json();
+        
+        if (tokenData.error) {
+            throw new Error(`GitHub OAuth error: ${tokenData.error_description}`);
+        }
+
+        // Get user info from GitHub
+        const userResponse = await fetch('https://api.github.com/user', {
+            headers: {
+                'Authorization': `token ${tokenData.access_token}`,
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+
+        const userData = await userResponse.json();
+        
+        if (!userData.email) {
+            // Get user email from GitHub API
+            const emailResponse = await fetch('https://api.github.com/user/emails', {
+                headers: {
+                    'Authorization': `token ${tokenData.access_token}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+            });
+            const emails = await emailResponse.json();
+            const primaryEmail = emails.find(email => email.primary);
+            userData.email = primaryEmail ? primaryEmail.email : userData.login + '@users.noreply.github.com';
+        }
+
+        // Create or get user session
+        const sessionData = await upsertUserAndCreateSession({
+            googleId: null,
+            email: userData.email,
+            name: userData.name || userData.login,
+            provider: 'github',
+            githubId: userData.id.toString(),
+            githubToken: tokenData.access_token
+        });
+
+        // Redirect to frontend with session data
+        const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/github/success?sessionId=${sessionData.sessionId}&token=${tokenData.access_token}`;
+        res.redirect(redirectUrl);
+
+    } catch (error) {
+        console.error('❌ GitHub OAuth error:', error);
+        const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/github/error?error=${encodeURIComponent(error.message)}`;
+        res.redirect(errorUrl);
     }
 });
 
@@ -343,6 +417,70 @@ app.post('/folders/create', async (req, res) => {
     } catch (error) {
         console.error('❌ Error in /folders/create:', error);
         return res.status(500).json({ error: 'server_error' });
+    }
+});
+
+// Save entire workspace in single API call (prevents server overload)
+app.post('/files/workspace', async (req, res) => {
+    try {
+        const { workspace, timestamp } = req.body;
+        const sessionId = req.headers['x-session-id'];
+        
+        if (!workspace || !sessionId) {
+            return res.status(400).json({ error: 'workspace data and sessionId required' });
+        }
+        
+        console.log(`💾 Saving entire workspace (${Object.keys(workspace).length} files) for session: ${sessionId}`);
+        
+        // Create session workspace directory
+        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        if (!fs.existsSync(sessionWorkspaceDir)) {
+            fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
+        }
+        
+        // Save all files in batch
+        const savePromises = Object.entries(workspace).map(async ([filePath, content]) => {
+            try {
+                // Save to database
+                await saveFile({ sessionId, filename: filePath, content });
+                
+                // Save to session workspace for terminal access
+                const fullPath = path.join(sessionWorkspaceDir, filePath);
+                const dirPath = path.dirname(fullPath);
+                
+                // Ensure directory exists
+                if (!fs.existsSync(dirPath)) {
+                    fs.mkdirSync(dirPath, { recursive: true });
+                }
+                
+                // Write file to session workspace
+                fs.writeFileSync(fullPath, content);
+                
+                return { path: filePath, success: true };
+            } catch (error) {
+                console.error(`❌ Error saving file ${filePath}:`, error);
+                return { path: filePath, success: false, error: error.message };
+            }
+        });
+        
+        // Wait for all files to be saved
+        const results = await Promise.all(savePromises);
+        
+        const successCount = results.filter(r => r.success).length;
+        const errorCount = results.filter(r => !r.success).length;
+        
+        console.log(`✅ Workspace saved: ${successCount} files successful, ${errorCount} errors`);
+        
+        res.json({ 
+            ok: true, 
+            saved: successCount, 
+            errors: errorCount,
+            timestamp: timestamp || Date.now()
+        });
+        
+    } catch (error) {
+        console.error('❌ Error in /files/workspace:', error);
+        res.status(500).json({ error: 'server_error', details: error.message });
     }
 });
 

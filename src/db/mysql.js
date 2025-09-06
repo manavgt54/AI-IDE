@@ -58,10 +58,23 @@ export async function initSchema() {
     await pool.query(`CREATE TABLE IF NOT EXISTS users (
       id INT AUTO_INCREMENT PRIMARY KEY,
       google_id VARCHAR(128) UNIQUE,
+      github_id VARCHAR(128) UNIQUE,
       email VARCHAR(255),
+      name VARCHAR(255),
+      github_token TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB;`)
     console.log('✅ MySQL: Users table created');
+
+    // Add GitHub fields to existing users table (migration)
+    try {
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id VARCHAR(128) UNIQUE');
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)');
+      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS github_token TEXT');
+      console.log('✅ MySQL: GitHub fields added to users table');
+    } catch (migrationError) {
+      console.log('ℹ️ MySQL: GitHub fields already exist or migration failed:', migrationError.message);
+    }
 
     await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
       session_id VARCHAR(64) PRIMARY KEY,
@@ -104,8 +117,8 @@ export async function initSchema() {
   }
 }
 
-export async function upsertUserAndCreateSession({ googleId, email }) {
-  console.log('🗄️ MySQL: Starting upsertUserAndCreateSession for:', { googleId, email })
+export async function upsertUserAndCreateSession({ googleId, email, provider, githubId, githubToken, name }) {
+  console.log('🗄️ MySQL: Starting upsertUserAndCreateSession for:', { googleId, email, provider, githubId })
   const pool = await getPool()
   console.log('🗄️ MySQL: Got connection pool')
   const conn = await pool.getConnection()
@@ -114,23 +127,49 @@ export async function upsertUserAndCreateSession({ googleId, email }) {
     await conn.beginTransaction()
     console.log('🗄️ MySQL: Transaction started')
     
-    const [u] = await conn.execute(
-      'SELECT id FROM users WHERE google_id = ? OR email = ? LIMIT 1',
-      [googleId || null, email || null]
-    )
+    // Build query based on provider
+    let query, params
+    if (provider === 'github') {
+      query = 'SELECT id FROM users WHERE github_id = ? OR email = ? LIMIT 1'
+      params = [githubId || null, email || null]
+    } else {
+      query = 'SELECT id FROM users WHERE google_id = ? OR email = ? LIMIT 1'
+      params = [googleId || null, email || null]
+    }
+    
+    const [u] = await conn.execute(query, params)
     console.log('🗄️ MySQL: User query result:', u)
     
     let userId
     if (Array.isArray(u) && u.length > 0) {
       userId = u[0].id
       console.log('🗄️ MySQL: Found existing user:', userId)
+      
+      // Update user info if needed (for GitHub users)
+      if (provider === 'github' && (githubId || name)) {
+        await conn.execute(
+          'UPDATE users SET github_id = ?, name = ?, github_token = ? WHERE id = ?',
+          [githubId || null, name || null, githubToken || null, userId]
+        )
+        console.log('🗄️ MySQL: Updated user GitHub info')
+      }
+    } else {
+      // Create new user based on provider
+      if (provider === 'github') {
+        const [r] = await conn.execute(
+          'INSERT INTO users (github_id, email, name, github_token) VALUES (?, ?, ?, ?)',
+          [githubId || null, email || null, name || null, githubToken || null]
+        )
+        userId = r.insertId
+        console.log('🗄️ MySQL: Created new GitHub user:', userId)
     } else {
       const [r] = await conn.execute(
-        'INSERT INTO users (google_id, email) VALUES (?, ?)',
-        [googleId || null, email || null]
+          'INSERT INTO users (google_id, email, name) VALUES (?, ?, ?)',
+          [googleId || null, email || null, name || null]
       )
       userId = r.insertId
-      console.log('🗄️ MySQL: Created new user:', userId)
+        console.log('🗄️ MySQL: Created new Google user:', userId)
+      }
     }
 
     // Check if user already has a permanent session
