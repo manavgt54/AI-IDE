@@ -28,6 +28,11 @@ export const ENV_CONFIG = {
   // Node.js Configuration
   NODE_VERSION: process.env.NODE_VERSION || '18.x',
   
+  // npm Configuration for cleaner terminal output
+  NPM_CONFIG_LOGLEVEL: process.env.NPM_CONFIG_LOGLEVEL || 'warn',
+  NPM_CONFIG_PROGRESS: process.env.NPM_CONFIG_PROGRESS || 'false',
+  NPM_CONFIG_AUDIT: process.env.NPM_CONFIG_AUDIT || 'false',
+  
   // Security Configuration
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || '*',
   CORS_ENABLED: process.env.CORS_ENABLED !== 'false', // Default to true

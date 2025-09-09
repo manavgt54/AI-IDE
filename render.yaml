@@ -28,3 +28,10 @@ services:
         value: "30000"
       - key: WS_MAX_PAYLOAD_SIZE
         value: "1048576"
+      # npm Configuration for cleaner terminal output
+      - key: NPM_CONFIG_LOGLEVEL
+        value: "warn"
+      - key: NPM_CONFIG_PROGRESS
+        value: "false"
+      - key: NPM_CONFIG_AUDIT
+        value: "false"

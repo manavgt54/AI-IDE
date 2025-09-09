@@ -1344,7 +1344,11 @@ wss.on('connection', (ws) => {
                     HOME: sessionWorkspaceDir,
                     PWD: sessionWorkspaceDir,
                     PATH: '/usr/local/bin:/usr/bin:/bin',
-                    TERM: 'xterm-color'
+                    TERM: 'xterm-color',
+                    // npm Configuration for cleaner terminal output
+                    NPM_CONFIG_LOGLEVEL: 'warn',
+                    NPM_CONFIG_PROGRESS: 'false',
+                    NPM_CONFIG_AUDIT: 'false'
                 };
                 
                 session.ptyProcess = spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
@@ -1605,13 +1609,35 @@ async function analyzeAndExecuteCommand({ raw, sessionId, sessionWorkspaceDir, c
         const executable = tokens[0].toLowerCase();
         const args = tokens.slice(1);
         
-        console.log('🔍 COMMAND ANALYSIS:', {
-            command: raw,
-            executable,
-            args,
-            sessionId: sessionId.substring(0, 8) + '...',
-            currentCwd: currentCwdAbs
-        });
+        // Simple commands that don't need any analysis - execute directly
+        const simpleCommands = [
+            'ls', 'dir', 'pwd', 'cd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'cat', 'echo', 'clear', 'whoami',
+            'date', 'time', 'ps', 'top', 'kill', 'killall', 'jobs', 'bg', 'fg', 'history', 'alias',
+            'which', 'where', 'type', 'help', 'man', 'info', 'apropos', 'whatis', 'locate', 'find',
+            'grep', 'awk', 'sed', 'sort', 'uniq', 'wc', 'head', 'tail', 'less', 'more', 'touch',
+            'chmod', 'chown', 'ln', 'df', 'du', 'free', 'uptime', 'uname', 'env', 'export', 'set',
+            'unset', 'source', '.', 'exit', 'logout', 'su', 'sudo', 'passwd', 'id', 'groups',
+            'w', 'who', 'last', 'finger', 'ping', 'traceroute', 'netstat', 'ss', 'lsof', 'curl',
+            'wget', 'ssh', 'scp', 'rsync', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'bzip2',
+            'xz', '7z', 'rar', 'unrar', 'mount', 'umount', 'fdisk', 'parted', 'mkfs', 'fsck'
+        ];
+        
+        // If it's a simple command, execute directly without analysis
+        if (simpleCommands.includes(executable)) {
+            return { ok: true, action: 'execute' };
+        }
+        
+        // Only log analysis for complex commands that need it
+        const needsAnalysis = ['npm', 'node', 'npx', 'git', 'python', 'pip', 'go', 'cargo', 'java', 'javac', 'gcc', 'g++'];
+        if (needsAnalysis.includes(executable)) {
+            console.log('🔍 COMMAND ANALYSIS:', {
+                command: raw,
+                executable,
+                args,
+                sessionId: sessionId.substring(0, 8) + '...',
+                currentCwd: currentCwdAbs
+            });
+        }
 
         // Step 1: Ensure all files are synced to workspace before command execution
         await ensureFilesSynced(sessionId, sessionWorkspaceDir);
@@ -1781,6 +1807,21 @@ function detectProjectRoot(dbFiles, currentCwdAbs, sessionWorkspaceDir) {
  * Analyzes Node.js package manager commands
  */
 function analyzeNodeCommand(executable, args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot) {
+    // Commands that don't require package.json
+    const noPackageJsonCommands = [
+        '--version', '-v', 'version',
+        '--help', '-h', 'help',
+        'config', 'cache', 'doctor',
+        'ping', 'whoami', 'logout', 'login',
+        'search', 'view', 'info', 'show',
+        'outdated', 'audit', 'fund'
+    ];
+    
+    // If it's a command that doesn't need package.json, execute directly
+    if (args.length > 0 && noPackageJsonCommands.includes(args[0])) {
+        return { action: 'execute' };
+    }
+    
     const packageJsonPath = resolvePath('package.json');
     
     if (!fileExists(packageJsonPath)) {
@@ -1810,6 +1851,18 @@ function analyzeNodeCommand(executable, args, resolvePath, fileExists, fileExist
  * Analyzes Node.js execution commands
  */
 function analyzeNodeExecution(args, resolvePath, fileExists, fileExistsInWorkspace) {
+    // Node commands that don't require a file
+    const noFileCommands = [
+        '--version', '-v', 'version',
+        '--help', '-h', 'help',
+        '--eval', '-e', '--print', '-p'
+    ];
+    
+    // If it's a command that doesn't need a file, execute directly
+    if (args.length > 0 && noFileCommands.includes(args[0])) {
+        return { action: 'execute' };
+    }
+    
     if (args.length < 1) return { action: 'execute' };
     
     const scriptPath = resolvePath(args[0]);
@@ -1827,21 +1880,19 @@ function analyzeNodeExecution(args, resolvePath, fileExists, fileExistsInWorkspa
  * Analyzes npx commands
  */
 function analyzeNpxCommand(args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot) {
-    // npx can run global tools or local tools
-    // If it's trying to run a local tool, check for package.json
-    if (args.length > 0) {
-        const tool = args[0];
-        const packageJsonPath = resolvePath('package.json');
-        
-        // Check if it's a local tool (usually in node_modules/.bin)
-        if (fileExists(packageJsonPath)) {
-            return { action: 'execute' };
-        }
-        
-        // For global tools, allow execution
+    // npx commands that don't require package.json
+    const noPackageJsonCommands = [
+        '--version', '-v', 'version',
+        '--help', '-h', 'help',
+        'create', 'degit', 'dlx'
+    ];
+    
+    // If it's a command that doesn't need package.json, execute directly
+    if (args.length > 0 && noPackageJsonCommands.includes(args[0])) {
         return { action: 'execute' };
     }
     
+    // For other npx commands, just execute (npx handles its own requirements)
     return { action: 'execute' };
 }
 
@@ -1889,8 +1940,19 @@ function analyzePipCommand(args, resolvePath, fileExists, fileExistsInWorkspace)
  * Analyzes Git commands
  */
 function analyzeGitCommand(args, resolvePath, fileExists, fileExistsInWorkspace, projectRoot) {
-    // Git commands are generally safe to run
-    // Just ensure we're in a reasonable directory
+    // Git commands that don't require a repository
+    const noRepoCommands = [
+        '--version', '-v', 'version',
+        '--help', '-h', 'help',
+        'config', 'init', 'clone'
+    ];
+    
+    // If it's a command that doesn't need a repo, execute directly
+    if (args.length > 0 && noRepoCommands.includes(args[0])) {
+        return { action: 'execute' };
+    }
+    
+    // For other git commands, just execute (let git handle its own error messages)
     return { action: 'execute' };
 }
 
@@ -2071,8 +2133,9 @@ app.post('/folders/batch-create', async (req, res) => {
 
         console.log(`📁 Batch creating ${folders.length} folders...`);
         
-        // Sort folders by depth to create parents first
-        const sortedFolders = folders.sort((a, b) => {
+        // Filter out empty folders and sort by depth to create parents first
+        const validFolders = folders.filter(f => f && f.trim() && f !== '');
+        const sortedFolders = validFolders.sort((a, b) => {
             const aDepth = a.split('/').length;
             const bDepth = b.split('/').length;
             return aDepth - bDepth;

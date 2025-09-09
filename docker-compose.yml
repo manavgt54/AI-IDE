@@ -15,6 +15,10 @@ services:
       - MAX_TERMINAL_SESSIONS=10
       - WS_HEARTBEAT_INTERVAL=30000
       - WS_MAX_PAYLOAD_SIZE=1048576
+      # npm Configuration for cleaner terminal output
+      - NPM_CONFIG_LOGLEVEL=warn
+      - NPM_CONFIG_PROGRESS=false
+      - NPM_CONFIG_AUDIT=false
     volumes:
       - ./workspace:/app/workspace
     restart: unless-stopped
