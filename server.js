@@ -6,6 +6,7 @@ import fs from 'fs';
 import cors from 'cors';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
+import unzipper from 'unzipper';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
@@ -703,6 +704,139 @@ app.post('/files/restore-node-modules', async (req, res) => {
     } catch (error) {
         console.error('❌ Error restoring node_modules:', error);
         res.status(500).json({ error: 'restore_error', details: error.message });
+    }
+});
+
+// Receive zipped workspace (single request) and extract safely
+app.post('/upload/zip', async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const project = (req.query.project || 'workspace').toString().replace(/[^a-zA-Z0-9_\-\/]/g, '');
+        if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const targetDir = path.join(sessionDir, project);
+        const tempDir = path.join(sessionDir, `.upload_tmp_${Date.now()}`);
+        fs.mkdirSync(tempDir, { recursive: true });
+
+        // Stream unzip into temp directory first to avoid partial overwrite
+        await new Promise((resolve, reject) => {
+            const extract = unzipper.Extract({ path: tempDir });
+            extract.on('close', resolve);
+            extract.on('error', reject);
+            req.pipe(extract);
+        });
+
+        // Ensure target exists
+        fs.mkdirSync(targetDir, { recursive: true });
+
+        // Move files from temp to target (preserve existing if missing)
+        const moveRecursive = (src, dst) => {
+            for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+                const srcPath = path.join(src, entry.name);
+                const dstPath = path.join(dst, entry.name);
+                if (entry.isDirectory()) {
+                    fs.mkdirSync(dstPath, { recursive: true });
+                    moveRecursive(srcPath, dstPath);
+                } else {
+                    // Write file (overwrite is OK because we finished full unzip)
+                    fs.copyFileSync(srcPath, dstPath);
+                }
+            }
+        };
+        moveRecursive(tempDir, targetDir);
+        fs.rmSync(tempDir, { recursive: true, force: true });
+
+        console.log(`✅ ZIP extracted to ${targetDir}`);
+        res.json({ ok: true, project });
+    } catch (e) {
+        console.error('❌ Error handling zip upload:', e);
+        res.status(500).json({ error: 'zip_extract_error', details: e.message });
+    }
+});
+
+// Chunked zip upload (very large zips)
+app.post('/upload/zip-chunk', async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const id = (req.query.id || '').toString();
+        const project = (req.query.project || 'workspace').toString().replace(/[^a-zA-Z0-9_\-\/]/g, '');
+        const index = parseInt((req.query.index || '0').toString(), 10);
+        if (!sessionId || !id || Number.isNaN(index)) return res.status(400).json({ error: 'missing params' });
+
+        const chunkDir = path.join(WORKSPACE_DIR, 'sessions', sessionId, '.chunks', id);
+        fs.mkdirSync(chunkDir, { recursive: true });
+        const chunkPath = path.join(chunkDir, `${index}.part`);
+
+        const ws = fs.createWriteStream(chunkPath);
+        await new Promise((resolve, reject) => {
+            req.pipe(ws);
+            ws.on('finish', resolve);
+            ws.on('error', reject);
+        });
+
+        res.json({ ok: true });
+    } catch (e) {
+        console.error('❌ zip-chunk error:', e);
+        res.status(500).json({ error: 'zip_chunk_error', details: e.message });
+    }
+});
+
+app.post('/upload/zip-chunk/complete', async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const id = (req.query.id || '').toString();
+        const project = (req.query.project || 'workspace').toString().replace(/[^a-zA-Z0-9_\-\/]/g, '');
+        if (!sessionId || !id) return res.status(400).json({ error: 'missing params' });
+
+        const baseDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const chunkDir = path.join(baseDir, '.chunks', id);
+        const tempZip = path.join(baseDir, `.upload_${id}.zip`);
+
+        // Concatenate parts in order
+        const parts = fs.readdirSync(chunkDir).filter(n => n.endsWith('.part')).sort((a, b) => parseInt(a) - parseInt(b));
+        const ws = fs.createWriteStream(tempZip);
+        for (const p of parts) {
+            const buf = fs.readFileSync(path.join(chunkDir, p));
+            ws.write(buf);
+        }
+        ws.end();
+        await new Promise(r => ws.on('close', r));
+
+        // Extract zip into temp then move like single zip handler
+        const tempDir = path.join(baseDir, `.upload_tmp_${Date.now()}`);
+        fs.mkdirSync(tempDir, { recursive: true });
+        await new Promise((resolve, reject) => {
+            const extract = unzipper.Extract({ path: tempDir });
+            extract.on('close', resolve);
+            extract.on('error', reject);
+            fs.createReadStream(tempZip).pipe(extract);
+        });
+
+        const targetDir = path.join(baseDir, project);
+        fs.mkdirSync(targetDir, { recursive: true });
+        const moveRecursive = (src, dst) => {
+            for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+                const srcPath = path.join(src, entry.name);
+                const dstPath = path.join(dst, entry.name);
+                if (entry.isDirectory()) {
+                    fs.mkdirSync(dstPath, { recursive: true });
+                    moveRecursive(srcPath, dstPath);
+                } else {
+                    fs.copyFileSync(srcPath, dstPath);
+                }
+            }
+        };
+        moveRecursive(tempDir, targetDir);
+        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(chunkDir, { recursive: true, force: true });
+        fs.rmSync(tempZip, { force: true });
+
+        console.log(`✅ Chunked ZIP extracted to ${targetDir}`);
+        res.json({ ok: true, project });
+    } catch (e) {
+        console.error('❌ zip-chunk complete error:', e);
+        res.status(500).json({ error: 'zip_chunk_complete_error', details: e.message });
     }
 });
 
