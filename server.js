@@ -6,6 +6,8 @@ import fs from 'fs';
 import cors from 'cors';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
+import { createGzip, createGunzip } from 'zlib';
+import { pipeline } from 'stream/promises';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
 import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo } from './src/db/mysql.js';
 
@@ -481,6 +483,137 @@ app.post('/files/workspace', async (req, res) => {
     } catch (error) {
         console.error('❌ Error in /files/workspace:', error);
         res.status(500).json({ error: 'server_error', details: error.message });
+    }
+});
+
+// Compress and store node_modules for faster restoration
+app.post('/files/compress-node-modules', async (req, res) => {
+    try {
+        const { nodeModulesData } = req.body;
+        const sessionId = req.headers['x-session-id'];
+        
+        if (!nodeModulesData || !sessionId) {
+            return res.status(400).json({ error: 'nodeModulesData and sessionId required' });
+        }
+        
+        console.log(`🗜️ Compressing node_modules for session: ${sessionId}`);
+        
+        // Create compressed storage directory
+        const compressedDir = path.join(WORKSPACE_DIR, 'compressed', sessionId);
+        if (!fs.existsSync(compressedDir)) {
+            fs.mkdirSync(compressedDir, { recursive: true });
+        }
+        
+        // Compress node_modules data
+        const compressedPath = path.join(compressedDir, 'node_modules.gz');
+        const writeStream = fs.createWriteStream(compressedPath);
+        const gzipStream = createGzip({ level: 9 }); // Maximum compression
+        
+        await pipeline(
+            fs.createReadStream(Buffer.from(JSON.stringify(nodeModulesData))),
+            gzipStream,
+            writeStream
+        );
+        
+        // Get compressed file size
+        const stats = fs.statSync(compressedPath);
+        const originalSize = JSON.stringify(nodeModulesData).length;
+        const compressionRatio = ((originalSize - stats.size) / originalSize * 100).toFixed(1);
+        
+        console.log(`✅ Node_modules compressed: ${(originalSize / 1024 / 1024).toFixed(1)}MB → ${(stats.size / 1024 / 1024).toFixed(1)}MB (${compressionRatio}% reduction)`);
+        
+        res.json({ 
+            ok: true, 
+            originalSize,
+            compressedSize: stats.size,
+            compressionRatio: `${compressionRatio}%`
+        });
+        
+    } catch (error) {
+        console.error('❌ Error compressing node_modules:', error);
+        res.status(500).json({ error: 'compression_error', details: error.message });
+    }
+});
+
+// Restore node_modules from compressed storage
+app.post('/files/restore-node-modules', async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        
+        if (!sessionId) {
+            return res.status(400).json({ error: 'sessionId required' });
+        }
+        
+        console.log(`📦 Restoring node_modules for session: ${sessionId}`);
+        
+        const compressedPath = path.join(WORKSPACE_DIR, 'compressed', sessionId, 'node_modules.gz');
+        
+        if (!fs.existsSync(compressedPath)) {
+            return res.status(404).json({ error: 'No compressed node_modules found' });
+        }
+        
+        // Decompress node_modules
+        const readStream = fs.createReadStream(compressedPath);
+        const gunzipStream = createGunzip();
+        const chunks = [];
+        
+        readStream.pipe(gunzipStream);
+        
+        gunzipStream.on('data', (chunk) => {
+            chunks.push(chunk);
+        });
+        
+        gunzipStream.on('end', async () => {
+            try {
+                const decompressedData = Buffer.concat(chunks).toString();
+                const nodeModulesData = JSON.parse(decompressedData);
+                
+                // Restore files to session workspace
+                const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                let restoredCount = 0;
+                
+                for (const [filePath, content] of Object.entries(nodeModulesData)) {
+                    try {
+                        // Save to database
+                        await saveFile({ sessionId, filename: filePath, content });
+                        
+                        // Save to session workspace
+                        const fullPath = path.join(sessionWorkspaceDir, filePath);
+                        const dirPath = path.dirname(fullPath);
+                        
+                        if (!fs.existsSync(dirPath)) {
+                            fs.mkdirSync(dirPath, { recursive: true });
+                        }
+                        
+                        fs.writeFileSync(fullPath, content);
+                        restoredCount++;
+                    } catch (error) {
+                        console.error(`❌ Error restoring file ${filePath}:`, error);
+                    }
+                }
+                
+                console.log(`✅ Node_modules restored: ${restoredCount} files`);
+                
+                res.json({ 
+                    ok: true, 
+                    restored: restoredCount,
+                    totalFiles: Object.keys(nodeModulesData).length
+                });
+                
+            } catch (error) {
+                console.error('❌ Error parsing decompressed data:', error);
+                res.status(500).json({ error: 'decompression_error', details: error.message });
+            }
+        });
+        
+        gunzipStream.on('error', (error) => {
+            console.error('❌ Decompression error:', error);
+            res.status(500).json({ error: 'decompression_error', details: error.message });
+        });
+        
+    } catch (error) {
+        console.error('❌ Error restoring node_modules:', error);
+        res.status(500).json({ error: 'restore_error', details: error.message });
     }
 });
 
