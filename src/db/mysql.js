@@ -9,15 +9,10 @@ const DB_CONFIG = {
   ssl: { rejectUnauthorized: false },
   // Add connection timeout settings
   connectTimeout: 60000, // 60 seconds
-  acquireTimeout: 60000, // 60 seconds
-  timeout: 60000, // 60 seconds
   // Add connection pool settings
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  // Add retry settings
-  maxRetries: 3,
-  retryDelay: 1000,
 }
 
 let pool
@@ -66,14 +61,23 @@ export async function initSchema() {
     ) ENGINE=InnoDB;`)
     console.log('✅ MySQL: Users table created');
 
-    // Add GitHub fields to existing users table (migration)
+    // Add GitHub fields to existing users table (migration) - MySQL doesn't support IF NOT EXISTS for ADD COLUMN
     try {
-      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id VARCHAR(128) UNIQUE');
-      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)');
-      await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS github_token TEXT');
-      console.log('✅ MySQL: GitHub fields added to users table');
+      const [columns] = await pool.query("SHOW COLUMNS FROM users LIKE 'github_id'")
+      if (Array.isArray(columns) && columns.length === 0) {
+        await pool.query('ALTER TABLE users ADD COLUMN github_id VARCHAR(128) UNIQUE')
+      }
+      const [nameCol] = await pool.query("SHOW COLUMNS FROM users LIKE 'name'")
+      if (Array.isArray(nameCol) && nameCol.length === 0) {
+        await pool.query('ALTER TABLE users ADD COLUMN name VARCHAR(255)')
+      }
+      const [tokenCol] = await pool.query("SHOW COLUMNS FROM users LIKE 'github_token'")
+      if (Array.isArray(tokenCol) && tokenCol.length === 0) {
+        await pool.query('ALTER TABLE users ADD COLUMN github_token TEXT')
+      }
+      console.log('✅ MySQL: GitHub fields ensured on users table')
     } catch (migrationError) {
-      console.log('ℹ️ MySQL: GitHub fields already exist or migration failed:', migrationError.message);
+      console.log('ℹ️ MySQL: GitHub fields ensure step skipped:', migrationError.message)
     }
 
     await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
