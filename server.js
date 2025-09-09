@@ -486,6 +486,95 @@ app.post('/files/workspace', async (req, res) => {
     }
 });
 
+// Fast bulk-save: save large workspaces primarily to disk with ignore rules (faster UX)
+app.post('/files/workspace-fast', async (req, res) => {
+    try {
+        const { workspace, timestamp } = req.body;
+        const sessionId = req.headers['x-session-id'];
+
+        if (!workspace || !sessionId) {
+            return res.status(400).json({ error: 'workspace data and sessionId required' });
+        }
+
+        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        if (!fs.existsSync(sessionWorkspaceDir)) {
+            fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
+        }
+
+        // Ignore patterns to avoid ghost/system files
+        const shouldIgnore = (filePath) => {
+            const p = filePath.replace(/\\/g, '/');
+            return (
+                p.includes('/.git/') || p.startsWith('.git/') ||
+                p.includes('/.idea/') || p.includes('/.vscode/') ||
+                p.includes('/__MACOSX/') || p.endsWith('/.DS_Store') ||
+                /(^|\/)Thumbs\.db$/i.test(p) || /(^|\/)desktop\.ini$/i.test(p) ||
+                /\.(png|jpg|jpeg|gif|ico|svg|webp|woff|woff2|ttf|eot|mp4|mp3|zip|tar|gz)$/i.test(p)
+            );
+        };
+
+        // Thresholds
+        const LARGE_FILE_BYTES = 5 * 1024 * 1024; // 5MB
+
+        let savedToDisk = 0;
+        let queuedForDb = 0;
+        let skipped = 0;
+        const errors = [];
+
+        // Save to disk immediately for speed; queue DB writes asynchronously for smaller files
+        const entries = Object.entries(workspace);
+        for (const [filePathRaw, content] of entries) {
+            const filePath = filePathRaw.replace(/^\/+/, '').replace(/\\/g, '/');
+            if (!filePath) { skipped++; continue; }
+            if (shouldIgnore(filePath)) { skipped++; continue; }
+
+            try {
+                const fullPath = path.join(sessionWorkspaceDir, filePath);
+                const dirPath = path.dirname(fullPath);
+                if (!fs.existsSync(dirPath)) {
+                    fs.mkdirSync(dirPath, { recursive: true });
+                }
+
+                // Write to disk (content could be string or Buffer-like)
+                const data = Buffer.isBuffer(content) ? content : Buffer.from(content);
+                fs.writeFileSync(fullPath, data);
+                savedToDisk++;
+
+                // Only queue DB save for smaller files to avoid DB bloat and slowness
+                if (data.length <= LARGE_FILE_BYTES) {
+                    queuedForDb++;
+                    // Schedule without blocking response
+                    setImmediate(async () => {
+                        try {
+                            await saveFile({ sessionId, filename: filePath, content: data });
+                        } catch (e) {
+                            console.error(`⚠️ Async DB save failed for ${filePath}:`, e);
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('❌ Error saving to disk:', filePath, e);
+                errors.push({ file: filePath, message: e.message });
+            }
+        }
+
+        console.log(`⚡ workspace-fast: disk=${savedToDisk}, dbQueued=${queuedForDb}, skipped=${skipped}, errors=${errors.length}`);
+
+        return res.json({
+            ok: true,
+            mode: 'fast',
+            savedToDisk,
+            dbQueued: queuedForDb,
+            skipped,
+            errors,
+            timestamp: timestamp || Date.now(),
+        });
+    } catch (error) {
+        console.error('❌ Error in /files/workspace-fast:', error);
+        res.status(500).json({ error: 'server_error', details: error.message });
+    }
+});
+
 // Compress and store node_modules for faster restoration
 app.post('/files/compress-node-modules', async (req, res) => {
     try {
