@@ -840,6 +840,251 @@ app.post('/upload/zip-chunk/complete', async (req, res) => {
     }
 });
 
+// Batch upload system with staging and atomic commits
+app.post('/api/files/upload-batch', async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const { batchId, files, projectId = 'workspace' } = req.body;
+        
+        if (!sessionId || !batchId || !files || !Array.isArray(files)) {
+            return res.status(400).json({ error: 'sessionId, batchId, and files array required' });
+        }
+
+        console.log(`📦 Processing batch ${batchId} with ${files.length} files for session: ${sessionId}`);
+
+        // Create staging directory
+        const stagingDir = path.join(WORKSPACE_DIR, 'staging', sessionId, batchId);
+        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const projectDir = path.join(sessionDir, projectId);
+        
+        fs.mkdirSync(stagingDir, { recursive: true });
+        fs.mkdirSync(projectDir, { recursive: true });
+
+        const results = [];
+        let successCount = 0;
+        let errorCount = 0;
+
+        // Process each file in the batch
+        for (const fileData of files) {
+            try {
+                const { path: filePath, content, size, mtime, hash } = fileData;
+                
+                // Validate file data
+                if (!filePath || content === undefined) {
+                    throw new Error('Invalid file data: missing path or content');
+                }
+
+                // Write to staging first
+                const stagingPath = path.join(stagingDir, filePath);
+                const stagingDirPath = path.dirname(stagingPath);
+                
+                if (!fs.existsSync(stagingDirPath)) {
+                    fs.mkdirSync(stagingDirPath, { recursive: true });
+                }
+                
+                fs.writeFileSync(stagingPath, content);
+                
+                results.push({
+                    path: filePath,
+                    success: true,
+                    staged: true
+                });
+                
+                successCount++;
+                
+            } catch (error) {
+                console.error(`❌ Error processing file in batch:`, error);
+                results.push({
+                    path: fileData.path || 'unknown',
+                    success: false,
+                    error: error.message
+                });
+                errorCount++;
+            }
+        }
+
+        // If all files staged successfully, commit to final location
+        if (errorCount === 0) {
+            try {
+                // Move files from staging to final location
+                const moveRecursive = (src, dst) => {
+                    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+                        const srcPath = path.join(src, entry.name);
+                        const dstPath = path.join(dst, entry.name);
+                        
+                        if (entry.isDirectory()) {
+                            fs.mkdirSync(dstPath, { recursive: true });
+                            moveRecursive(srcPath, dstPath);
+                        } else {
+                            fs.copyFileSync(srcPath, dstPath);
+                        }
+                    }
+                };
+                
+                moveRecursive(stagingDir, projectDir);
+                
+                // Save to database
+                for (const fileData of files) {
+                    try {
+                        await saveFile({ 
+                            sessionId, 
+                            filename: fileData.path, 
+                            content: fileData.content 
+                        });
+                    } catch (error) {
+                        console.error(`❌ Error saving to database:`, error);
+                    }
+                }
+                
+                // Clean up staging
+                fs.rmSync(stagingDir, { recursive: true, force: true });
+                
+                console.log(`✅ Batch ${batchId} committed successfully: ${successCount} files`);
+                
+            } catch (error) {
+                console.error(`❌ Error committing batch ${batchId}:`, error);
+                // Clean up staging on error
+                fs.rmSync(stagingDir, { recursive: true, force: true });
+                throw error;
+            }
+        } else {
+            // Clean up staging on partial failure
+            fs.rmSync(stagingDir, { recursive: true, force: true });
+        }
+
+        res.json({
+            ok: true,
+            batchId,
+            successCount,
+            errorCount,
+            results
+        });
+
+    } catch (error) {
+        console.error('❌ Error in /api/files/upload-batch:', error);
+        res.status(500).json({ error: 'batch_upload_error', details: error.message });
+    }
+});
+
+// Single file upload for batch system
+app.post('/api/files/upload', upload.single('file'), async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const { path: filePath, size, mtime, hash } = req.body;
+        
+        if (!sessionId || !req.file) {
+            return res.status(400).json({ error: 'sessionId and file required' });
+        }
+
+        const actualPath = filePath || req.file.originalname;
+        const content = req.file.buffer.toString('utf8');
+        
+        // Save to database
+        await saveFile({ sessionId, filename: actualPath, content });
+        
+        // Save to session workspace
+        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const fullPath = path.join(sessionDir, actualPath);
+        const dirPath = path.dirname(fullPath);
+        
+        if (!fs.existsSync(dirPath)) {
+            fs.mkdirSync(dirPath, { recursive: true });
+        }
+        
+        fs.writeFileSync(fullPath, content);
+        
+        res.json({
+            ok: true,
+            path: actualPath,
+            size: content.length
+        });
+
+    } catch (error) {
+        console.error('❌ Error in /api/files/upload:', error);
+        res.status(500).json({ error: 'upload_error', details: error.message });
+    }
+});
+
+// Chunked file upload for large files
+app.post('/api/files/upload-chunk', upload.single('file'), async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const { path: filePath, chunkIndex, totalChunks, uploadId, hash } = req.body;
+        
+        if (!sessionId || !req.file || !filePath || chunkIndex === undefined || totalChunks === undefined || !uploadId) {
+            return res.status(400).json({ error: 'Missing required parameters' });
+        }
+
+        // Create chunk directory
+        const chunkDir = path.join(WORKSPACE_DIR, 'chunks', sessionId, uploadId);
+        fs.mkdirSync(chunkDir, { recursive: true });
+        
+        // Save chunk
+        const chunkPath = path.join(chunkDir, `chunk_${chunkIndex}`);
+        fs.writeFileSync(chunkPath, req.file.buffer);
+        
+        res.json({ ok: true, chunkIndex });
+
+    } catch (error) {
+        console.error('❌ Error in /api/files/upload-chunk:', error);
+        res.status(500).json({ error: 'chunk_upload_error', details: error.message });
+    }
+});
+
+// Complete chunked upload
+app.post('/api/files/upload-complete', async (req, res) => {
+    try {
+        const sessionId = req.headers['x-session-id'];
+        const { path: filePath, uploadId, totalChunks, hash } = req.body;
+        
+        if (!sessionId || !filePath || !uploadId || !totalChunks) {
+            return res.status(400).json({ error: 'Missing required parameters' });
+        }
+
+        // Reconstruct file from chunks
+        const chunkDir = path.join(WORKSPACE_DIR, 'chunks', sessionId, uploadId);
+        const chunks = [];
+        
+        for (let i = 0; i < totalChunks; i++) {
+            const chunkPath = path.join(chunkDir, `chunk_${i}`);
+            if (fs.existsSync(chunkPath)) {
+                chunks.push(fs.readFileSync(chunkPath));
+            } else {
+                throw new Error(`Missing chunk ${i}`);
+            }
+        }
+        
+        const content = Buffer.concat(chunks).toString('utf8');
+        
+        // Save to database
+        await saveFile({ sessionId, filename: filePath, content });
+        
+        // Save to session workspace
+        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const fullPath = path.join(sessionDir, filePath);
+        const dirPath = path.dirname(fullPath);
+        
+        if (!fs.existsSync(dirPath)) {
+            fs.mkdirSync(dirPath, { recursive: true });
+        }
+        
+        fs.writeFileSync(fullPath, content);
+        
+        // Clean up chunks
+        fs.rmSync(chunkDir, { recursive: true, force: true });
+        
+        res.json({
+            ok: true,
+            path: filePath,
+            size: content.length
+        });
+
+    } catch (error) {
+        console.error('❌ Error in /api/files/upload-complete:', error);
+        res.status(500).json({ error: 'upload_complete_error', details: error.message });
+    }
+});
+
 // Upload multiple files (DB-only), preserving provided relative paths
 app.post('/files/upload', upload.array('files'), async (req, res) => {
     try {
