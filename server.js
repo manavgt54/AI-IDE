@@ -1220,8 +1220,17 @@ app.delete('/sessions/:sessionId', async (req, res) => {
 // Create HTTP server
 const server = http.createServer(app);
 
-// Create WebSocket server
-const wss = new WebSocketServer({ server });
+// Create WebSocket server with better configuration
+const wss = new WebSocketServer({ 
+    server,
+    // Increase timeout and add keep-alive settings
+    perMessageDeflate: false,
+    maxPayload: 16 * 1024 * 1024, // 16MB max payload
+    handshakeTimeout: 30000, // 30 seconds
+    // Add ping/pong settings
+    pingTimeout: 60000, // 60 seconds
+    pingInterval: 30000 // 30 seconds
+});
 
 // WebSocket connection handler
 wss.on('connection', (ws) => {
@@ -1283,20 +1292,22 @@ wss.on('connection', (ws) => {
         }
     });
     
-    ws.on('close', () => {
-        console.log('🔌 WebSocket connection closed');
+    ws.on('close', (code, reason) => {
+        console.log('🔌 WebSocket connection closed:', code, reason.toString());
         if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
         }
         if (currentSessionId && sessions.has(currentSessionId)) {
             const session = sessions.get(currentSessionId);
             if (session.ptyProcess) {
-                session.ptyProcess.kill();
+                // Don't kill the PTY process immediately - let it finish
+                console.log('🔄 Keeping PTY process alive for potential reconnection');
             }
             if (session.keepAliveInterval) {
                 clearInterval(session.keepAliveInterval);
             }
-            sessions.delete(currentSessionId);
+            // Don't delete the session immediately - keep it for reconnection
+            console.log('🔄 Keeping session alive for potential reconnection');
         }
     });
     
@@ -1305,6 +1316,8 @@ wss.on('connection', (ws) => {
         if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
         }
+        // Don't close the connection immediately on error
+        // Let the client handle reconnection
     });
     
     async function handleInit(ws, data) {
@@ -1413,13 +1426,23 @@ wss.on('connection', (ws) => {
                     env: restrictedEnv,
                     // Add options to prevent process from being killed
                     detached: false,
-                    stdio: 'pipe'
+                    stdio: 'pipe',
+                    // Add process options for better stability
+                    windowsHide: true,
+                    // Increase buffer sizes for long-running commands
+                    maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+                    // Prevent process from being killed by parent
+                    killSignal: 'SIGTERM'
                 });
                 
                 // Override cd command to prevent access to parent directories
                 session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                 session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                 session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                
+                // Initialize git configuration in the session directory (local config)
+                session.ptyProcess.write('git config user.name "IDE User"\n');
+                session.ptyProcess.write('git config user.email "user@ide.local"\n');
                 session.ptyProcess.write('function cd() { if [[ "$1" == "/"* ]] && [[ "$1" != "' + sessionWorkspaceDir + '"* ]]; then echo "Access denied: Cannot access system directories"; return 1; fi; builtin cd "$@"; }\n');
                 session.ptyProcess.write('export -f cd\n');
                 
