@@ -1293,6 +1293,9 @@ wss.on('connection', (ws) => {
             if (session.ptyProcess) {
                 session.ptyProcess.kill();
             }
+            if (session.keepAliveInterval) {
+                clearInterval(session.keepAliveInterval);
+            }
             sessions.delete(currentSessionId);
         }
     });
@@ -1384,12 +1387,22 @@ wss.on('connection', (ws) => {
                     ...process.env,
                     HOME: sessionWorkspaceDir,
                     PWD: sessionWorkspaceDir,
-                    PATH: '/usr/local/bin:/usr/bin:/bin',
+                    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
                     TERM: 'xterm-color',
-                    // npm Configuration for cleaner terminal output
+                    // npm Configuration for cleaner terminal output and better reliability
                     NPM_CONFIG_LOGLEVEL: 'warn',
                     NPM_CONFIG_PROGRESS: 'false',
-                    NPM_CONFIG_AUDIT: 'false'
+                    NPM_CONFIG_AUDIT: 'false',
+                    NPM_CONFIG_FUND: 'false',
+                    NPM_CONFIG_UPDATE_NOTIFIER: 'false',
+                    NPM_CONFIG_CACHE: path.join(sessionWorkspaceDir, '.npm-cache'),
+                    NPM_CONFIG_PREFIX: path.join(sessionWorkspaceDir, '.npm-global'),
+                    // Increase timeout for long-running commands
+                    NPM_CONFIG_TIMEOUT: '300000', // 5 minutes
+                    NPM_CONFIG_REGISTRY_TIMEOUT: '300000',
+                    // Disable some features that might cause issues
+                    NPM_CONFIG_SAVE: 'false',
+                    NPM_CONFIG_SAVE_EXACT: 'false'
                 };
                 
                 session.ptyProcess = spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
@@ -1397,7 +1410,10 @@ wss.on('connection', (ws) => {
                     cols: 80,
                     rows: 30,
                     cwd: sessionWorkspaceDir,
-                    env: restrictedEnv
+                    env: restrictedEnv,
+                    // Add options to prevent process from being killed
+                    detached: false,
+                    stdio: 'pipe'
                 });
                 
                 // Override cd command to prevent access to parent directories
@@ -1408,6 +1424,7 @@ wss.on('connection', (ws) => {
                 session.ptyProcess.write('export -f cd\n');
                 
                 session.ptyProcess.onData((data) => {
+                    lastActivity = Date.now(); // Update activity timestamp
                     if (session.ws && session.ws.readyState === WebSocket.OPEN) {
                         session.ws.send(JSON.stringify({ type: 'output', data }));
                     }
@@ -1419,6 +1436,80 @@ wss.on('connection', (ws) => {
                         session.ws.send(JSON.stringify({ type: 'exit', exitCode, signal }));
                     }
                 });
+                
+                // Add process monitoring to prevent unexpected kills
+                session.ptyProcess.on('error', (error) => {
+                    console.error('❌ PTY process error:', error);
+                    if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+                        session.ws.send(JSON.stringify({ type: 'error', message: `PTY process error: ${error.message}` }));
+                    }
+                });
+                
+                // Keep-alive mechanism that doesn't interfere with commands
+                let lastActivity = Date.now();
+                let keepAliveInterval = setInterval(() => {
+                    const now = Date.now();
+                    const timeSinceActivity = now - lastActivity;
+                    
+                    // If no activity for 2 minutes, send a harmless command to keep connection alive
+                    if (timeSinceActivity > 120000 && session.ptyProcess && !session.ptyProcess.killed) {
+                        try {
+                            // Send a harmless command that won't interfere with npm install
+                            session.ptyProcess.write('echo "\\r\\n[Keep-alive ping]\\r\\n"\n');
+                            lastActivity = now;
+                        } catch (error) {
+                            console.log('Keep-alive ping failed:', error.message);
+                        }
+                    }
+                    
+                    // Check if PTY process was killed and restart if needed
+                    if (session.ptyProcess && session.ptyProcess.killed) {
+                        console.log('⚠️ PTY process was killed, attempting to restart...');
+                        try {
+                            session.ptyProcess = spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
+                                name: 'xterm-color',
+                                cols: 80,
+                                rows: 30,
+                                cwd: sessionWorkspaceDir,
+                                env: restrictedEnv,
+                                detached: false,
+                                stdio: 'pipe'
+                            });
+                            
+                            session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
+                            session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
+                            session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                            
+                            session.ptyProcess.onData((data) => {
+                                lastActivity = Date.now(); // Update activity timestamp
+                                if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+                                    session.ws.send(JSON.stringify({ type: 'output', data }));
+                                }
+                            });
+                            
+                            session.ptyProcess.onExit(({ exitCode, signal }) => {
+                                console.log('🔌 PTY process exited:', { exitCode, signal });
+                                if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+                                    session.ws.send(JSON.stringify({ type: 'exit', exitCode, signal }));
+                                }
+                            });
+                            
+                            session.ptyProcess.on('error', (error) => {
+                                console.error('❌ PTY process error:', error);
+                                if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+                                    session.ws.send(JSON.stringify({ type: 'error', message: `PTY process error: ${error.message}` }));
+                                }
+                            });
+                            
+                            console.log('✅ PTY process restarted');
+                        } catch (restartError) {
+                            console.error('❌ Failed to restart PTY process:', restartError);
+                        }
+                    }
+                }, 30000); // Check every 30 seconds
+                
+                // Store the interval ID so we can clear it later
+                session.keepAliveInterval = keepAliveInterval;
                 
                 session.ptyReady = true;
                 console.log('✅ PTY process initialized for session:', sessionId);
