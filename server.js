@@ -1228,21 +1228,52 @@ wss.on('connection', (ws) => {
     console.log('🔌 New WebSocket connection established');
     
     let currentSessionId = null;
+    let heartbeatInterval = null;
+    let isAlive = true;
+    
+    // Set up heartbeat to keep connection alive
+    const startHeartbeat = () => {
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(() => {
+            if (isAlive && ws.readyState === WebSocket.OPEN) {
+                try {
+                    ws.ping();
+                } catch (error) {
+                    console.log('❌ Heartbeat ping failed:', error.message);
+                    isAlive = false;
+                    clearInterval(heartbeatInterval);
+                }
+            }
+        }, 30000); // Ping every 30 seconds
+    };
+    
+    ws.on('pong', () => {
+        isAlive = true;
+    });
     
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
             console.log('📨 Received message:', data.type);
             
+            // Reset heartbeat on any message
+            isAlive = true;
+            
             switch (data.type) {
                 case 'init':
                     await handleInit(ws, data);
+                    startHeartbeat(); // Start heartbeat after init
                     break;
                 case 'reconnect':
                     await handleReconnect(ws, data);
+                    startHeartbeat(); // Start heartbeat after reconnect
                     break;
                 case 'input':
                     await handleInput(ws, data);
+                    break;
+                case 'ping':
+                    // Respond to client ping
+                    ws.send(JSON.stringify({ type: 'pong' }));
                     break;
                 default:
                     console.log('❌ Unknown message type:', data.type);
@@ -1254,12 +1285,22 @@ wss.on('connection', (ws) => {
     
     ws.on('close', () => {
         console.log('🔌 WebSocket connection closed');
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
         if (currentSessionId && sessions.has(currentSessionId)) {
             const session = sessions.get(currentSessionId);
             if (session.ptyProcess) {
                 session.ptyProcess.kill();
             }
             sessions.delete(currentSessionId);
+        }
+    });
+    
+    ws.on('error', (error) => {
+        console.error('❌ WebSocket error:', error);
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
         }
     });
     
