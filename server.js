@@ -2061,6 +2061,63 @@ setInterval(async () => {
     }
 }, 10000); // Every 10 seconds
 
+// Batch create folders endpoint
+app.post('/folders/batch-create', async (req, res) => {
+    try {
+        const { folders } = req.body;
+        if (!folders || !Array.isArray(folders)) {
+            return res.status(400).json({ error: 'Folders array is required' });
+        }
+
+        console.log(`📁 Batch creating ${folders.length} folders...`);
+        
+        // Sort folders by depth to create parents first
+        const sortedFolders = folders.sort((a, b) => {
+            const aDepth = a.split('/').length;
+            const bDepth = b.split('/').length;
+            return aDepth - bDepth;
+        });
+
+        const createdFolders = [];
+        const errors = [];
+
+        for (const folderPath of sortedFolders) {
+            try {
+                // Create folder in workspace
+                const fullPath = path.join(WORKSPACE_DIR, folderPath);
+                await fs.promises.mkdir(fullPath, { recursive: true });
+
+                // Save to database (ignore if already exists)
+                try {
+                    await db.run(
+                        'INSERT OR IGNORE INTO files (filename, content, created_at, updated_at) VALUES (?, ?, ?, ?)',
+                        [folderPath, '', Date.now(), Date.now()]
+                    );
+                    createdFolders.push(folderPath);
+                } catch (dbError) {
+                    // Folder might already exist in DB, that's okay
+                    createdFolders.push(folderPath);
+                }
+            } catch (error) {
+                console.error(`Error creating folder ${folderPath}:`, error);
+                errors.push({ folder: folderPath, error: error.message });
+            }
+        }
+
+        console.log(`✅ Created ${createdFolders.length} folders successfully`);
+        
+        res.json({ 
+            success: true, 
+            message: `Created ${createdFolders.length} folders`,
+            created: createdFolders,
+            errors: errors
+        });
+    } catch (error) {
+        console.error('Error batch creating folders:', error);
+        res.status(500).json({ error: 'Failed to batch create folders' });
+    }
+});
+
 // Start server
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
