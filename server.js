@@ -1798,6 +1798,10 @@ wss.on('connection', (ws) => {
                         console.error('⚠️ Command sync error:', syncErr);
                     }
                     
+                    // ✅ CRITICAL FIX: Actually execute the command after all analysis and special handling
+                    console.log(`🚀 EXECUTING COMMAND: ${input.trim()}`);
+                    session.ptyProcess.write(input);
+                    
                     // Clear any existing timeout when sending new command
                     if (session.commandTimeout) {
                         clearTimeout(session.commandTimeout);
