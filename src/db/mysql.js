@@ -236,6 +236,62 @@ export async function saveFile({ sessionId, filename, content }) {
   }
 }
 
+// ✅ ADDED: Batch save files to MySQL for better performance
+export async function batchSaveFiles({ sessionId, files }) {
+  const pool = await getPool()
+  const conn = await pool.getConnection()
+  
+  try {
+    await conn.beginTransaction()
+    console.log(`📦 MySQL: Starting batch save of ${files.length} files for session: ${sessionId}`)
+    
+    let savedCount = 0
+    let updatedCount = 0
+    let errorCount = 0
+    
+    for (const { filename, content } of files) {
+      try {
+        // First try to update existing file
+        const [updateResult] = await conn.execute(
+          'UPDATE files SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND filename = ?',
+          [Buffer.from(content), sessionId, filename]
+        )
+        
+        // If no rows were updated, insert new file
+        if (updateResult.affectedRows === 0) {
+          await conn.execute(
+            'INSERT INTO files (session_id, filename, content) VALUES (?, ?, ?)',
+            [sessionId, filename, Buffer.from(content)]
+          )
+          savedCount++
+        } else {
+          updatedCount++
+        }
+      } catch (fileError) {
+        console.error(`❌ MySQL: Error saving file ${filename}:`, fileError)
+        errorCount++
+      }
+    }
+    
+    await conn.commit()
+    console.log(`✅ MySQL: Batch save completed - Saved: ${savedCount}, Updated: ${updatedCount}, Errors: ${errorCount}`)
+    
+    return {
+      success: true,
+      saved: savedCount,
+      updated: updatedCount,
+      errors: errorCount,
+      total: files.length
+    }
+  } catch (error) {
+    await conn.rollback()
+    console.error('❌ MySQL: Batch save transaction failed:', error)
+    throw error
+  } finally {
+    conn.release()
+  }
+}
+
 export async function readFileByName({ sessionId, filename }) {
   const pool = await getPool()
   const [rows] = await pool.execute(

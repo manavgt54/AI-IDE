@@ -10,7 +10,7 @@ import unzipper from 'unzipper';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
-import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo } from './src/db/mysql.js';
+import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo, batchSaveFiles } from './src/db/mysql.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -441,12 +441,9 @@ app.post('/files/workspace', async (req, res) => {
             fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
         }
         
-        // Save all files in batch
-        const savePromises = Object.entries(workspace).map(async ([filePath, content]) => {
+        // ✅ STEP 1: Save all files locally instantly for immediate access
+        const localSavePromises = Object.entries(workspace).map(async ([filePath, content]) => {
             try {
-                // Save to database
-                await saveFile({ sessionId, filename: filePath, content });
-                
                 // Save to session workspace for terminal access
                 const fullPath = path.join(sessionWorkspaceDir, filePath);
                 const dirPath = path.dirname(fullPath);
@@ -461,13 +458,30 @@ app.post('/files/workspace', async (req, res) => {
                 
                 return { path: filePath, success: true };
             } catch (error) {
-                console.error(`❌ Error saving file ${filePath}:`, error);
+                console.error(`❌ Error saving file locally ${filePath}:`, error);
                 return { path: filePath, success: false, error: error.message };
             }
         });
         
-        // Wait for all files to be saved
-        const results = await Promise.all(savePromises);
+        // Wait for all files to be saved locally
+        const localResults = await Promise.all(localSavePromises);
+        
+        // ✅ STEP 2: Batch save all files to MySQL database
+        const filesToSave = Object.entries(workspace).map(([filePath, content]) => ({
+            filename: filePath,
+            content: content
+        }));
+        
+        let batchResult = { success: true, saved: 0, updated: 0, errors: 0, total: filesToSave.length };
+        try {
+            batchResult = await batchSaveFiles({ sessionId, files: filesToSave });
+            console.log(`📦 Batch save completed: ${batchResult.saved} saved, ${batchResult.updated} updated, ${batchResult.errors} errors`);
+        } catch (batchError) {
+            console.error('❌ Batch save failed:', batchError);
+            batchResult = { success: false, error: batchError.message };
+        }
+        
+        const results = localResults;
         
         const successCount = results.filter(r => r.success).length;
         const errorCount = results.filter(r => !r.success).length;
@@ -478,7 +492,8 @@ app.post('/files/workspace', async (req, res) => {
             ok: true, 
             saved: successCount, 
             errors: errorCount,
-            timestamp: timestamp || Date.now()
+            timestamp: timestamp || Date.now(),
+            batchSave: batchResult
         });
         
     } catch (error) {
@@ -1448,6 +1463,23 @@ wss.on('connection', (ws) => {
                 session.ptyProcess.write('export NPM_CONFIG_CACHE="' + sessionWorkspaceDir + '/.npm-cache"\n');
                 session.ptyProcess.write('export NPM_CONFIG_PREFIX="' + sessionWorkspaceDir + '/.npm-global"\n');
                 
+                // ✅ ADDED: Periodic sync of terminal-created files to database
+                const syncTerminalFiles = async () => {
+                    try {
+                        const files = await scanDirectoryForFiles(sessionWorkspaceDir, sessionWorkspaceDir);
+                        if (files.length > 0) {
+                            console.log(`🔄 Syncing ${files.length} terminal-created files to database...`);
+                            const result = await batchSaveFiles({ sessionId, files });
+                            console.log(`✅ Terminal sync completed: ${result.saved} saved, ${result.updated} updated`);
+                        }
+                    } catch (error) {
+                        console.error('⚠️ Error syncing terminal files:', error);
+                    }
+                };
+                
+                // Sync every 30 seconds
+                session.syncInterval = setInterval(syncTerminalFiles, 30000);
+                
                 // Initialize git configuration in the session directory (local config)
                 // Wait a moment for the shell to be ready
                 setTimeout(() => {
@@ -1787,10 +1819,62 @@ wss.on('connection', (ws) => {
             if (session.ptyProcess) {
                 session.ptyProcess.kill();
             }
+            // ✅ ADDED: Cleanup sync interval
+            if (session.syncInterval) {
+                clearInterval(session.syncInterval);
+                console.log('🔄 Sync interval cleared for session:', currentSessionId);
+            }
             sessions.delete(currentSessionId);
         }
     });
 });
+
+// -------------------------
+// File System Utilities
+// -------------------------
+
+// ✅ ADDED: Scan directory for files and return them in batch save format
+async function scanDirectoryForFiles(rootDir, currentDir) {
+    const files = [];
+    
+    try {
+        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        
+        for (const entry of entries) {
+            const fullPath = path.join(currentDir, entry.name);
+            const relativePath = path.relative(rootDir, fullPath).replace(/\\/g, '/');
+            
+            // Skip hidden files and common ignore patterns
+            if (entry.name.startsWith('.') || 
+                entry.name === 'node_modules' || 
+                entry.name === '.git' ||
+                entry.name === '.npm-cache' ||
+                entry.name === '.npm-global') {
+                continue;
+            }
+            
+            if (entry.isDirectory()) {
+                // Recursively scan subdirectories
+                const subFiles = await scanDirectoryForFiles(rootDir, fullPath);
+                files.push(...subFiles);
+            } else if (entry.isFile()) {
+                try {
+                    const content = fs.readFileSync(fullPath, 'utf8');
+                    files.push({
+                        filename: relativePath,
+                        content: content
+                    });
+                } catch (readError) {
+                    console.error(`⚠️ Error reading file ${relativePath}:`, readError);
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`⚠️ Error scanning directory ${currentDir}:`, error);
+    }
+    
+    return files;
+}
 
 // -------------------------
 // Comprehensive Command Analysis & Execution System
@@ -1829,13 +1913,13 @@ async function analyzeAndExecuteCommand({ raw, sessionId, sessionWorkspaceDir, c
         // Only log analysis for complex commands that need it
         const needsAnalysis = ['npm', 'node', 'npx', 'git', 'python', 'pip', 'go', 'cargo', 'java', 'javac', 'gcc', 'g++'];
         if (needsAnalysis.includes(executable)) {
-            console.log('🔍 COMMAND ANALYSIS:', {
-                command: raw,
-                executable,
-                args,
-                sessionId: sessionId.substring(0, 8) + '...',
-                currentCwd: currentCwdAbs
-            });
+        console.log('🔍 COMMAND ANALYSIS:', {
+            command: raw,
+            executable,
+            args,
+            sessionId: sessionId.substring(0, 8) + '...',
+            currentCwd: currentCwdAbs
+        });
         }
 
         // Step 1: Ensure all files are synced to workspace before command execution
@@ -2088,9 +2172,9 @@ function analyzeNpxCommand(args, resolvePath, fileExists, fileExistsInWorkspace,
     
     // If it's a command that doesn't need package.json, execute directly
     if (args.length > 0 && noPackageJsonCommands.includes(args[0])) {
-        return { action: 'execute' };
-    }
-    
+            return { action: 'execute' };
+        }
+        
     // For other npx commands, just execute (npx handles its own requirements)
     return { action: 'execute' };
 }
