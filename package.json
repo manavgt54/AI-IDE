@@ -15,6 +15,7 @@
     "sessions": "curl -s http://localhost:8000/terminal/sessions | jq . || echo 'Sessions check failed'"
   },
   "dependencies": {
+    "chokidar": "^3.5.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "fs-extra": "^11.1.1",
