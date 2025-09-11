@@ -1441,8 +1441,11 @@ wss.on('connection', (ws) => {
                 session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
                 
                 // Initialize git configuration in the session directory (local config)
-                session.ptyProcess.write('git config user.name "IDE User"\n');
-                session.ptyProcess.write('git config user.email "user@ide.local"\n');
+                // Wait a moment for the shell to be ready
+                setTimeout(() => {
+                    session.ptyProcess.write('git config user.name "IDE User"\n');
+                    session.ptyProcess.write('git config user.email "user@ide.local"\n');
+                }, 1000);
                 session.ptyProcess.write('function cd() { if [[ "$1" == "/"* ]] && [[ "$1" != "' + sessionWorkspaceDir + '"* ]]; then echo "Access denied: Cannot access system directories"; return 1; fi; builtin cd "$@"; }\n');
                 session.ptyProcess.write('export -f cd\n');
                 
