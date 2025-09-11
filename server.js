@@ -1345,7 +1345,8 @@ wss.on('connection', (ws) => {
                 userId: null,
                 currentCwd: sessionWorkspaceDir,
                 ptyReady: false,
-                containerId: null
+                containerId: null,
+                commandTimeout: null  // ✅ ADDED: Command timeout property
             };
             
             sessions.set(sessionId, session);
@@ -1408,8 +1409,9 @@ wss.on('connection', (ws) => {
                     NPM_CONFIG_AUDIT: 'false',
                     NPM_CONFIG_FUND: 'false',
                     NPM_CONFIG_UPDATE_NOTIFIER: 'false',
-                    NPM_CONFIG_CACHE: path.join(sessionWorkspaceDir, '.npm-cache'),
-                    NPM_CONFIG_PREFIX: path.join(sessionWorkspaceDir, '.npm-global'),
+                    // ✅ FIXED: Use system npm cache instead of session-specific (causes permission issues)
+                    // NPM_CONFIG_CACHE: path.join(sessionWorkspaceDir, '.npm-cache'),
+                    // NPM_CONFIG_PREFIX: path.join(sessionWorkspaceDir, '.npm-global'),
                     // Increase timeout for long-running commands
                     NPM_CONFIG_TIMEOUT: '300000', // 5 minutes
                     NPM_CONFIG_REGISTRY_TIMEOUT: '300000',
@@ -1432,15 +1434,19 @@ wss.on('connection', (ws) => {
                     // Increase buffer sizes for long-running commands
                     maxBuffer: 1024 * 1024 * 10, // 10MB buffer
                     // Prevent process from being killed by parent
-                    killSignal: 'SIGTERM',
-                    // Add timeout for commands
-                    timeout: 30000 // 30 second timeout
+                    killSignal: 'SIGTERM'
+                    // ❌ REMOVED: timeout: 30000 - This was killing the entire process!
                 });
                 
                 // Override cd command to prevent access to parent directories
                 session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                 session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                 session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                
+                // ✅ FIXED: Create npm directories and set proper permissions
+                session.ptyProcess.write('mkdir -p .npm-cache .npm-global 2>/dev/null || true\n');
+                session.ptyProcess.write('export NPM_CONFIG_CACHE="' + sessionWorkspaceDir + '/.npm-cache"\n');
+                session.ptyProcess.write('export NPM_CONFIG_PREFIX="' + sessionWorkspaceDir + '/.npm-global"\n');
                 
                 // Initialize git configuration in the session directory (local config)
                 // Wait a moment for the shell to be ready
@@ -2026,8 +2032,8 @@ function analyzeNodeCommand(executable, args, resolvePath, fileExists, fileExist
             };
         }
         
-        // For install commands, allow them to create package.json
-        if (['install', 'i', 'add', 'remove', 'uninstall'].includes(args[0])) {
+        // For install commands, allow them to create package.json or install without it
+        if (['install', 'i', 'add', 'remove', 'uninstall', 'init'].includes(args[0])) {
             return { action: 'execute' };
         }
         
