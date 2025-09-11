@@ -10,7 +10,7 @@ import unzipper from 'unzipper';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
-import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo, batchSaveFiles } from './src/db/mysql.js';
+import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo, batchSaveFiles, verifyDatabaseData } from './src/db/mysql.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -154,6 +154,26 @@ app.get('/health', (req, res) => {
         sessions: sessions.size,
         pty: sessions.size > 0 ? 'running' : 'none'
     });
+});
+
+// ✅ ADDED: Database verification endpoint
+app.get('/verify-db', async (req, res) => {
+    try {
+        const sessionId = req.query.sessionId;
+        const verification = await verifyDatabaseData(sessionId);
+        res.json({
+            success: true,
+            verification,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('❌ Database verification failed:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // Initialize DB schema
@@ -1913,13 +1933,13 @@ async function analyzeAndExecuteCommand({ raw, sessionId, sessionWorkspaceDir, c
         // Only log analysis for complex commands that need it
         const needsAnalysis = ['npm', 'node', 'npx', 'git', 'python', 'pip', 'go', 'cargo', 'java', 'javac', 'gcc', 'g++'];
         if (needsAnalysis.includes(executable)) {
-        console.log('🔍 COMMAND ANALYSIS:', {
-            command: raw,
-            executable,
-            args,
-            sessionId: sessionId.substring(0, 8) + '...',
-            currentCwd: currentCwdAbs
-        });
+            console.log('🔍 COMMAND ANALYSIS:', {
+                command: raw,
+                executable,
+                args,
+                sessionId: sessionId.substring(0, 8) + '...',
+                currentCwd: currentCwdAbs
+            });
         }
 
         // Step 1: Ensure all files are synced to workspace before command execution

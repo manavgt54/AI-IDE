@@ -244,6 +244,7 @@ export async function batchSaveFiles({ sessionId, files }) {
   try {
     await conn.beginTransaction()
     console.log(`📦 MySQL: Starting batch save of ${files.length} files for session: ${sessionId}`)
+    console.log(`🔍 MySQL: Database config - Host: ${DB_CONFIG.host}, Port: ${DB_CONFIG.port}, DB: ${DB_CONFIG.database}, User: ${DB_CONFIG.user}`)
     
     let savedCount = 0
     let updatedCount = 0
@@ -264,8 +265,10 @@ export async function batchSaveFiles({ sessionId, files }) {
             [sessionId, filename, Buffer.from(content)]
           )
           savedCount++
+          console.log(`✅ MySQL: INSERTED file: ${filename} (${content.length} bytes)`)
         } else {
           updatedCount++
+          console.log(`✅ MySQL: UPDATED file: ${filename} (${content.length} bytes)`)
         }
       } catch (fileError) {
         console.error(`❌ MySQL: Error saving file ${filename}:`, fileError)
@@ -275,6 +278,17 @@ export async function batchSaveFiles({ sessionId, files }) {
     
     await conn.commit()
     console.log(`✅ MySQL: Batch save completed - Saved: ${savedCount}, Updated: ${updatedCount}, Errors: ${errorCount}`)
+    
+    // ✅ ADDED: Verify data was actually saved by querying the database
+    try {
+      const [verifyRows] = await conn.execute(
+        'SELECT COUNT(*) as count FROM files WHERE session_id = ?',
+        [sessionId]
+      )
+      console.log(`🔍 MySQL: Verification - Total files in DB for session: ${verifyRows[0].count}`)
+    } catch (verifyError) {
+      console.error('⚠️ MySQL: Verification query failed:', verifyError)
+    }
     
     return {
       success: true,
@@ -428,6 +442,55 @@ export async function getUserSessionByGoogleAccount({ googleId, email }) {
     return null
   } catch (error) {
     console.error('❌ MySQL: Error getting user session:', error)
+    throw error
+  }
+}
+
+// ✅ ADDED: Function to verify database data and connection
+export async function verifyDatabaseData(sessionId) {
+  const pool = await getPool()
+  try {
+    console.log('🔍 MySQL: Verifying database data...')
+    console.log(`🔍 MySQL: Database config - Host: ${DB_CONFIG.host}, Port: ${DB_CONFIG.port}, DB: ${DB_CONFIG.database}, User: ${DB_CONFIG.user}`)
+    
+    // Test connection
+    const [connectionTest] = await pool.execute('SELECT 1 as test')
+    console.log('✅ MySQL: Connection test successful:', connectionTest[0])
+    
+    // Check users table
+    const [users] = await pool.execute('SELECT COUNT(*) as count FROM users')
+    console.log(`📊 MySQL: Users in database: ${users[0].count}`)
+    
+    // Check sessions table
+    const [sessions] = await pool.execute('SELECT COUNT(*) as count FROM sessions')
+    console.log(`📊 MySQL: Sessions in database: ${sessions[0].count}`)
+    
+    // Check files table
+    const [files] = await pool.execute('SELECT COUNT(*) as count FROM files')
+    console.log(`📊 MySQL: Total files in database: ${files[0].count}`)
+    
+    // Check files for specific session
+    if (sessionId) {
+      const [sessionFiles] = await pool.execute('SELECT COUNT(*) as count FROM files WHERE session_id = ?', [sessionId])
+      console.log(`📊 MySQL: Files for session ${sessionId}: ${sessionFiles[0].count}`)
+      
+      // Get sample files for this session
+      const [sampleFiles] = await pool.execute('SELECT filename, LENGTH(content) as size FROM files WHERE session_id = ? LIMIT 5', [sessionId])
+      console.log('📄 MySQL: Sample files for session:')
+      sampleFiles.forEach(file => {
+        console.log(`  - ${file.filename} (${file.size} bytes)`)
+      })
+    }
+    
+    return {
+      connection: true,
+      users: users[0].count,
+      sessions: sessions[0].count,
+      totalFiles: files[0].count,
+      sessionFiles: sessionId ? (await pool.execute('SELECT COUNT(*) as count FROM files WHERE session_id = ?', [sessionId]))[0][0].count : 0
+    }
+  } catch (error) {
+    console.error('❌ MySQL: Database verification failed:', error)
     throw error
   }
 }
