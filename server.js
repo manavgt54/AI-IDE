@@ -1518,6 +1518,9 @@ wss.on('connection', (ws) => {
                 session.ptyProcess.onData((data) => {
                     lastActivity = Date.now(); // Update activity timestamp
                     
+                    // ✅ ADDED: Debug PTY output
+                    console.log(`📤 PTY OUTPUT (${data.length} bytes):`, data.toString().substring(0, 100));
+                    
                     // Clear any existing timeout when we get output
                     if (session.commandTimeout) {
                         clearTimeout(session.commandTimeout);
@@ -1525,6 +1528,9 @@ wss.on('connection', (ws) => {
                     }
                     if (session.ws && session.ws.readyState === WebSocket.OPEN) {
                         session.ws.send(JSON.stringify({ type: 'output', data }));
+                        console.log(`📤 Sent to frontend: ${data.toString().substring(0, 50)}...`);
+                    } else {
+                        console.log('⚠️ WebSocket not ready, cannot send output');
                     }
                 });
                 
@@ -1800,7 +1806,18 @@ wss.on('connection', (ws) => {
                     
                     // ✅ CRITICAL FIX: Actually execute the command after all analysis and special handling
                     console.log(`🚀 EXECUTING COMMAND: ${input.trim()}`);
+                    console.log(`🔍 PTY Process ready: ${session.ptyReady}, PID: ${session.ptyProcess.pid}`);
                     session.ptyProcess.write(input);
+                    
+                    // ✅ ADDED: Debug output for npm install specifically
+                    if (input.trim().startsWith('npm install')) {
+                        console.log('📦 npm install command sent, waiting for output...');
+                        // Send a test message to frontend to confirm command was sent
+                        ws.send(JSON.stringify({
+                            type: 'output',
+                            data: `\r\n\x1b[36m[SYSTEM]\x1b[0m npm install command sent to terminal...\r\n`
+                        }));
+                    }
                     
                     // Clear any existing timeout when sending new command
                     if (session.commandTimeout) {
