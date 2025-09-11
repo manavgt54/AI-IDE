@@ -1418,7 +1418,7 @@ wss.on('connection', (ws) => {
                     NPM_CONFIG_SAVE_EXACT: 'false'
                 };
                 
-                session.ptyProcess = spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', [], {
+                session.ptyProcess = spawn(process.platform === 'win32' ? 'powershell.exe' : 'bash', ['-i'], {
                     name: 'xterm-color',
                     cols: 80,
                     rows: 30,
@@ -1432,7 +1432,9 @@ wss.on('connection', (ws) => {
                     // Increase buffer sizes for long-running commands
                     maxBuffer: 1024 * 1024 * 10, // 10MB buffer
                     // Prevent process from being killed by parent
-                    killSignal: 'SIGTERM'
+                    killSignal: 'SIGTERM',
+                    // Add timeout for commands
+                    timeout: 30000 // 30 second timeout
                 });
                 
                 // Override cd command to prevent access to parent directories
@@ -1443,14 +1445,26 @@ wss.on('connection', (ws) => {
                 // Initialize git configuration in the session directory (local config)
                 // Wait a moment for the shell to be ready
                 setTimeout(() => {
-                    session.ptyProcess.write('git config user.name "IDE User"\n');
-                    session.ptyProcess.write('git config user.email "user@ide.local"\n');
+                    // Initialize git repo first, then set config
+                    session.ptyProcess.write('git init 2>/dev/null || true\n');
+                    session.ptyProcess.write('git config user.name "IDE User" 2>/dev/null || true\n');
+                    session.ptyProcess.write('git config user.email "user@ide.local" 2>/dev/null || true\n');
                 }, 1000);
                 session.ptyProcess.write('function cd() { if [[ "$1" == "/"* ]] && [[ "$1" != "' + sessionWorkspaceDir + '"* ]]; then echo "Access denied: Cannot access system directories"; return 1; fi; builtin cd "$@"; }\n');
                 session.ptyProcess.write('export -f cd\n');
                 
+                // Add command timeout handling
+                let commandTimeout = null;
+                let currentCommand = '';
+                
                 session.ptyProcess.onData((data) => {
                     lastActivity = Date.now(); // Update activity timestamp
+                    
+                    // Clear any existing timeout when we get output
+                    if (session.commandTimeout) {
+                        clearTimeout(session.commandTimeout);
+                        session.commandTimeout = null;
+                    }
                     if (session.ws && session.ws.readyState === WebSocket.OPEN) {
                         session.ws.send(JSON.stringify({ type: 'output', data }));
                     }
@@ -1724,6 +1738,27 @@ wss.on('connection', (ws) => {
                         }
                     } catch (syncErr) {
                         console.error('⚠️ Command sync error:', syncErr);
+                    }
+                    
+                    // Clear any existing timeout when sending new command
+                    if (session.commandTimeout) {
+                        clearTimeout(session.commandTimeout);
+                        session.commandTimeout = null;
+                    }
+                    
+                    // Set timeout for long-running commands
+                    if (input.trim().startsWith('npm install') || input.trim().startsWith('npm i')) {
+                        session.commandTimeout = setTimeout(() => {
+                            console.log('⚠️ npm install timeout, sending interrupt signal');
+                            session.ptyProcess.write('\x03'); // Send Ctrl+C
+                            session.commandTimeout = null;
+                        }, 120000); // 2 minutes for npm install
+                    } else if (input.trim().startsWith('npm') || input.trim().startsWith('node') || input.trim().startsWith('python')) {
+                        session.commandTimeout = setTimeout(() => {
+                            console.log('⚠️ Command timeout, sending interrupt signal');
+                            session.ptyProcess.write('\x03'); // Send Ctrl+C
+                            session.commandTimeout = null;
+                        }, 30000); // 30 seconds for other commands
                     }
                     
                     session.ptyProcess.write(input);
