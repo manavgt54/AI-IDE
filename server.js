@@ -1448,43 +1448,6 @@ wss.on('connection', (ws) => {
                 session.ptyProcess.write('export NPM_CONFIG_CACHE="' + sessionWorkspaceDir + '/.npm-cache"\n');
                 session.ptyProcess.write('export NPM_CONFIG_PREFIX="' + sessionWorkspaceDir + '/.npm-global"\n');
                 
-                // ✅ ADDED: File watcher to capture terminal-created files
-                const chokidar = await import('chokidar');
-                const watcher = chokidar.watch(sessionWorkspaceDir, {
-                    ignored: /(^|[\/\\])\../, // ignore dotfiles
-                    persistent: true,
-                    ignoreInitial: true
-                });
-                
-                watcher.on('add', async (filePath) => {
-                    try {
-                        const relativePath = path.relative(sessionWorkspaceDir, filePath).replace(/\\/g, '/');
-                        if (fs.statSync(filePath).isFile()) {
-                            const content = fs.readFileSync(filePath, 'utf8');
-                            await saveFile({ sessionId, filename: relativePath, content });
-                            console.log(`📄 Auto-saved terminal file: ${relativePath}`);
-                        }
-                    } catch (error) {
-                        console.error(`⚠️ Error auto-saving file ${filePath}:`, error);
-                    }
-                });
-                
-                watcher.on('change', async (filePath) => {
-                    try {
-                        const relativePath = path.relative(sessionWorkspaceDir, filePath).replace(/\\/g, '/');
-                        if (fs.statSync(filePath).isFile()) {
-                            const content = fs.readFileSync(filePath, 'utf8');
-                            await saveFile({ sessionId, filename: relativePath, content });
-                            console.log(`📄 Auto-updated terminal file: ${relativePath}`);
-                        }
-                    } catch (error) {
-                        console.error(`⚠️ Error auto-updating file ${filePath}:`, error);
-                    }
-                });
-                
-                // Store watcher in session for cleanup
-                session.fileWatcher = watcher;
-                
                 // Initialize git configuration in the session directory (local config)
                 // Wait a moment for the shell to be ready
                 setTimeout(() => {
@@ -1823,11 +1786,6 @@ wss.on('connection', (ws) => {
             const session = sessions.get(currentSessionId);
             if (session.ptyProcess) {
                 session.ptyProcess.kill();
-            }
-            // ✅ ADDED: Cleanup file watcher
-            if (session.fileWatcher) {
-                session.fileWatcher.close();
-                console.log('📁 File watcher closed for session:', currentSessionId);
             }
             sessions.delete(currentSessionId);
         }
