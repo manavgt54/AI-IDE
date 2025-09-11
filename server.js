@@ -1473,10 +1473,13 @@ wss.on('connection', (ws) => {
                     // ❌ REMOVED: timeout: 30000 - This was killing the entire process!
                 });
                 
-                // Override cd command to prevent access to parent directories
+                // ✅ FIXED: Properly initialize terminal in session directory
+                console.log(`📁 Initializing terminal in: ${sessionWorkspaceDir}`);
                 session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                 session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                 session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                session.ptyProcess.write('pwd\n'); // Verify directory
+                session.ptyProcess.write('ls -la\n'); // Show contents
                 
                 // ✅ FIXED: Create npm directories and set proper permissions
                 session.ptyProcess.write('mkdir -p .npm-cache .npm-global 2>/dev/null || true\n');
