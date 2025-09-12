@@ -1551,6 +1551,10 @@ wss.on('connection', (ws) => {
                     session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                     session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                     session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                    // Ensure permissions so cd/ls work reliably
+                    session.ptyProcess.write('chmod -R 777 "' + sessionWorkspaceDir + '" 2>/dev/null || true\n');
+                    // Make prompt show absolute cwd instead of ~
+                    session.ptyProcess.write('export PS1="\\u@\\h:$(pwd)# "\n');
                     session.ptyProcess.write('pwd\n'); // Verify directory
                     session.ptyProcess.write('ls -la\n'); // Show contents
                     session.ptyProcess.write('echo "📁 Checking for frontend folder..."\n');
