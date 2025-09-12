@@ -491,6 +491,18 @@ app.post('/files/workspace', async (req, res) => {
         
         console.log(`💾 Saving entire workspace (${Object.keys(workspace).length} files) for session: ${sessionId}`);
         
+        // 🔍 DEBUG: Check what's actually in the workspace data
+        console.log('🔍 DEBUG: Workspace data sample:');
+        const sampleFiles = Object.entries(workspace).slice(0, 3);
+        sampleFiles.forEach(([path, content]) => {
+            console.log(`  📄 ${path}: ${typeof content} (${content ? content.length : 0} chars)`);
+            if (content && content.length > 0) {
+                console.log(`    Preview: ${content.substring(0, 100)}...`);
+            } else {
+                console.log(`    ⚠️ EMPTY CONTENT!`);
+            }
+        });
+        
         // Create session workspace directory
         const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
         if (!fs.existsSync(sessionWorkspaceDir)) {
@@ -511,6 +523,9 @@ app.post('/files/workspace', async (req, res) => {
                 
                 // Write file to session workspace
                 fs.writeFileSync(fullPath, content);
+                
+                // 🔍 DEBUG: Log what's being saved
+                console.log(`📄 Saved file: ${filePath} -> ${fullPath} (${content.length} bytes)`);
                 
                 return { path: filePath, success: true };
             } catch (error) {
@@ -1538,6 +1553,10 @@ wss.on('connection', (ws) => {
                     session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
                     session.ptyProcess.write('pwd\n'); // Verify directory
                     session.ptyProcess.write('ls -la\n'); // Show contents
+                    session.ptyProcess.write('echo "📁 Checking for frontend folder..."\n');
+                    session.ptyProcess.write('ls -la frontend/ 2>/dev/null || echo "❌ No frontend folder found"\n');
+                    session.ptyProcess.write('echo "📁 Checking for backend folder..."\n');
+                    session.ptyProcess.write('ls -la backend/ 2>/dev/null || echo "❌ No backend folder found"\n');
                     console.log(`✅ Terminal directory change completed`);
                 }, 1000); // Wait 1 second for terminal to be ready
                 
