@@ -23,7 +23,8 @@ let mockPty = null;
 
 // Environment variables from config
 const PORT = getPort();
-const WORKSPACE_DIR = getWorkspaceDir();
+// Ensure absolute workspace path for both FS and PTY shell usage
+const WORKSPACE_DIR = path.resolve(getWorkspaceDir());
 
 console.log('🚀 Starting simplified terminal server...');
 console.log(`📁 Workspace directory: ${WORKSPACE_DIR}`);
@@ -1551,6 +1552,9 @@ wss.on('connection', (ws) => {
                     session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                     session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                     session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                    // Ensure npm paths use absolute session path (not relative)
+                    session.ptyProcess.write('export NPM_CONFIG_CACHE="' + sessionWorkspaceDir + '/.npm-cache"\n');
+                    session.ptyProcess.write('export NPM_CONFIG_PREFIX="' + sessionWorkspaceDir + '/.npm-global"\n');
                     // Ensure permissions so cd/ls work reliably
                     session.ptyProcess.write('chmod -R 777 "' + sessionWorkspaceDir + '" 2>/dev/null || true\n');
                     // Make prompt show absolute cwd instead of ~
@@ -1732,6 +1736,16 @@ wss.on('connection', (ws) => {
                 session.ws = ws;
                 
                 if (session.ptyReady) {
+                    // Re-assert environment, cwd, and absolute npm vars on reconnect
+                    const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                    try {
+                        session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
+                        session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
+                        session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                        session.ptyProcess.write('export NPM_CONFIG_CACHE="' + sessionWorkspaceDir + '/.npm-cache"\n');
+                        session.ptyProcess.write('export NPM_CONFIG_PREFIX="' + sessionWorkspaceDir + '/.npm-global"\n');
+                        session.ptyProcess.write('pwd\n');
+                    } catch {}
                     ws.send(JSON.stringify({ type: 'pty-ready', sessionId: sessionId, message: 'Terminal ready' }));
                 } else {
                     ws.send(JSON.stringify({ type: 'error', message: 'Session not ready' }));
