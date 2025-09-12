@@ -176,6 +176,42 @@ app.get('/verify-db', async (req, res) => {
     }
 });
 
+// ✅ ADDED: Manual terminal sync endpoint
+app.post('/terminal/sync', async (req, res) => {
+    try {
+        const { sessionId } = req.body;
+        if (!sessionId) {
+            return res.status(400).json({ error: 'sessionId required' });
+        }
+        
+        const session = sessions.get(sessionId);
+        if (!session) {
+            return res.status(404).json({ error: 'session not found' });
+        }
+        
+        if (!session.ptyProcess || !session.ptyReady) {
+            return res.status(400).json({ error: 'terminal not ready' });
+        }
+        
+        console.log(`🔄 Manual terminal sync requested for session: ${sessionId}`);
+        
+        // Trigger terminal refresh
+        session.ptyProcess.write('echo "🔄 Manual sync triggered..."\n');
+        session.ptyProcess.write('pwd\n');
+        session.ptyProcess.write('ls -la\n');
+        
+        res.json({ 
+            ok: true, 
+            message: 'Terminal sync triggered',
+            sessionId: sessionId
+        });
+        
+    } catch (error) {
+        console.error('❌ Error in terminal sync:', error);
+        res.status(500).json({ error: 'sync_failed', details: error.message });
+    }
+});
+
 // Initialize DB schema
 initSchema().then(() => console.log('🗄️ MySQL schema ready')).catch(e => console.error('MySQL init failed', e));
 
@@ -508,12 +544,30 @@ app.post('/files/workspace', async (req, res) => {
         
         console.log(`✅ Workspace saved: ${successCount} files successful, ${errorCount} errors`);
         
+        // ✅ ADDED: Immediate terminal sync after MySQL save
+        try {
+            const session = sessions.get(sessionId);
+            if (session && session.ptyProcess && session.ptyReady) {
+                console.log(`🔄 Triggering immediate terminal refresh for session: ${sessionId}`);
+                // Send a refresh command to terminal to show updated files
+                session.ptyProcess.write('echo "📁 Files updated - refreshing..."\n');
+                session.ptyProcess.write('pwd\n');
+                session.ptyProcess.write('ls -la\n');
+                console.log(`✅ Terminal refresh triggered for session: ${sessionId}`);
+            } else {
+                console.log(`⚠️ Terminal not ready for session: ${sessionId}`);
+            }
+        } catch (syncError) {
+            console.error('⚠️ Error triggering terminal refresh:', syncError);
+        }
+        
         res.json({ 
             ok: true, 
             saved: successCount, 
             errors: errorCount,
             timestamp: timestamp || Date.now(),
-            batchSave: batchResult
+            batchSave: batchResult,
+            terminalRefreshed: true
         });
         
     } catch (error) {
