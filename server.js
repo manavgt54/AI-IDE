@@ -1529,11 +1529,17 @@ wss.on('connection', (ws) => {
                 
                 // ✅ FIXED: Properly initialize terminal in session directory
                 console.log(`📁 Initializing terminal in: ${sessionWorkspaceDir}`);
-                session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
-                session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
-                session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
-                session.ptyProcess.write('pwd\n'); // Verify directory
-                session.ptyProcess.write('ls -la\n'); // Show contents
+                
+                // Wait for terminal to be ready, then change directory
+                setTimeout(() => {
+                    console.log(`🔄 Changing terminal directory to: ${sessionWorkspaceDir}`);
+                    session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
+                    session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
+                    session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
+                    session.ptyProcess.write('pwd\n'); // Verify directory
+                    session.ptyProcess.write('ls -la\n'); // Show contents
+                    console.log(`✅ Terminal directory change completed`);
+                }, 1000); // Wait 1 second for terminal to be ready
                 
                 // ✅ FIXED: Create npm directories and set proper permissions
                 session.ptyProcess.write('mkdir -p .npm-cache .npm-global 2>/dev/null || true\n');
@@ -1571,6 +1577,7 @@ wss.on('connection', (ws) => {
                 // Add command timeout handling
                 let commandTimeout = null;
                 let currentCommand = '';
+                let terminalReady = false; // ✅ ADDED: Terminal readiness flag
                 
                 session.ptyProcess.onData((data) => {
                     lastActivity = Date.now(); // Update activity timestamp
