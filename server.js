@@ -10,7 +10,7 @@ import unzipper from 'unzipper';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
-import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, getPool, deleteFileByName, getSessionInfo, batchSaveFiles, verifyDatabaseData } from './src/db/mysql.js';
+import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, deleteFileByName, getSessionInfo, batchSaveFiles, verifyDatabaseData, verifyTerminalSession } from './src/db/sqlite.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -72,7 +72,10 @@ if (!fs.existsSync(WORKSPACE_DIR)) {
 
 const app = express();
 app.set('etag', false); // disable ETag to avoid 304 on API responses
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:5173', 'http://localhost:3000', 'https://ai-ide-5.onrender.com'],
+  credentials: true
+}));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'workspace')));
 // Multer in-memory storage for binary-safe uploads
@@ -214,7 +217,7 @@ app.post('/terminal/sync', async (req, res) => {
 });
 
 // Initialize DB schema
-initSchema().then(() => console.log('🗄️ MySQL schema ready')).catch(e => console.error('MySQL init failed', e));
+initSchema().then(() => console.log('🗄️ SQLite schema ready')).catch(e => console.error('SQLite init failed', e));
 
 // Minimal Google auth endpoint: expects { googleId, email }
 app.post('/auth/google', async (req, res) => {
@@ -227,9 +230,9 @@ app.post('/auth/google', async (req, res) => {
         }
         console.log('📝 Creating user and session for:', { googleId, email });
         
-        const { userId, sessionId } = await upsertUserAndCreateSession({ googleId, email, provider: 'google' });
-        console.log('✅ User and session created:', { userId, sessionId });
-        return res.json({ ok: true, userId, sessionId });
+        const { userId, sessionId, terminalToken, workspacePath } = await upsertUserAndCreateSession({ googleId, email, provider: 'google' });
+        console.log('✅ User and session created:', { userId, sessionId, workspacePath });
+        return res.json({ ok: true, userId, sessionId, terminalToken, workspacePath });
     } catch (e) {
         console.error('❌ Auth error:', e);
         return res.status(500).json({ error: 'auth_failed', details: e.message });
@@ -248,12 +251,24 @@ app.post('/auth/session', async (req, res) => {
         
         if (existingSession) {
             console.log('✅ Reusing existing permanent session for user:', existingSession.sessionId);
-            return res.json({ ok: true, userId: existingSession.userId, sessionId: existingSession.sessionId });
+            return res.json({ 
+                ok: true, 
+                userId: existingSession.userId, 
+                sessionId: existingSession.sessionId,
+                terminalToken: existingSession.terminalToken,
+                workspacePath: existingSession.workspacePath
+            });
         } else {
             // Create new permanent session if none exists
             console.log('🆕 Creating new permanent session for user');
             const result = await upsertUserAndCreateSession({ googleId, email, provider: 'google' });
-            return res.json({ ok: true, userId: result.userId, sessionId: result.sessionId });
+            return res.json({ 
+                ok: true, 
+                userId: result.userId, 
+                sessionId: result.sessionId,
+                terminalToken: result.terminalToken,
+                workspacePath: result.workspacePath
+            });
         }
     } catch (e) {
         console.error('❌ /auth/session error:', e);
@@ -325,7 +340,7 @@ app.get('/auth/github/callback', async (req, res) => {
         });
 
         // Redirect to frontend with session data
-        const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/github/success?sessionId=${sessionData.sessionId}&token=${tokenData.access_token}`;
+        const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/github/success?sessionId=${sessionData.sessionId}&terminalToken=${sessionData.terminalToken}&token=${tokenData.access_token}`;
         res.redirect(redirectUrl);
 
     } catch (error) {
@@ -1427,31 +1442,47 @@ wss.on('connection', (ws) => {
     
     async function handleInit(ws, data) {
         try {
-            const { sessionId } = data;
+            const { sessionId, terminalToken } = data;
             if (!sessionId) {
                 ws.send(JSON.stringify({ type: 'error', message: 'Session ID required' }));
                 return;
             }
             
-            currentSessionId = sessionId;
-            console.log('🔧 Initializing session:', sessionId);
+            if (!terminalToken) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Terminal token required for session verification' }));
+                return;
+            }
             
-            // Create session-specific workspace directory
-            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            // Verify terminal session with SQLite
+            const sessionInfo = await verifyTerminalSession(sessionId, terminalToken);
+            if (!sessionInfo) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Invalid session or terminal token' }));
+                return;
+            }
+            
+            currentSessionId = sessionId;
+            console.log('🔧 Initializing verified session:', sessionId, 'for user:', sessionInfo.user_id);
+            
+            // Use SQLite session's isolated workspace directory
+            const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path);
             if (!fs.existsSync(sessionWorkspaceDir)) {
                 fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
-                console.log('📁 Created session workspace:', sessionWorkspaceDir);
+                console.log('📁 Created isolated session workspace:', sessionWorkspaceDir);
+            } else {
+                console.log('📁 Using existing isolated session workspace:', sessionWorkspaceDir);
             }
             
             // Create new session 
             const session = {
                 ws,
                 ptyProcess: null,
-                userId: null,
+                userId: sessionInfo.user_id,
                 currentCwd: sessionWorkspaceDir,
                 ptyReady: false,
                 containerId: null,
-                commandTimeout: null  // ✅ ADDED: Command timeout property
+                commandTimeout: null,  // ✅ ADDED: Command timeout property
+                terminalToken: terminalToken,  // Store terminal token for verification
+                workspacePath: sessionInfo.workspace_path  // Store workspace path
             };
             
             sessions.set(sessionId, session);
@@ -1722,14 +1753,26 @@ wss.on('connection', (ws) => {
     
     async function handleReconnect(ws, data) {
         try {
-            const { sessionId } = data;
+            const { sessionId, terminalToken } = data;
             if (!sessionId) {
                 ws.send(JSON.stringify({ type: 'error', message: 'Session ID required' }));
                 return;
             }
             
+            if (!terminalToken) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Terminal token required for session verification' }));
+                return;
+            }
+            
+            // Verify terminal session with SQLite
+            const sessionInfo = await verifyTerminalSession(sessionId, terminalToken);
+            if (!sessionInfo) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Invalid session or terminal token' }));
+                return;
+            }
+            
             currentSessionId = sessionId;
-            console.log('🔧 Reconnecting to session:', sessionId);
+            console.log('🔧 Reconnecting to verified session:', sessionId, 'for user:', sessionInfo.user_id);
             
             if (sessions.has(sessionId)) {
                 const session = sessions.get(sessionId);
@@ -1737,7 +1780,7 @@ wss.on('connection', (ws) => {
                 
                 if (session.ptyReady) {
                     // Re-assert environment, cwd, and absolute npm vars on reconnect
-                    const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                    const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path);
                     try {
                         session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                         session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
@@ -1754,7 +1797,7 @@ wss.on('connection', (ws) => {
                 // Session doesn't exist in memory, but exists in database
                 // Create a new session in memory for this sessionId
                 console.log('🆕 Creating new session in memory for existing sessionId:', sessionId);
-                await handleInit(ws, { sessionId });
+                await handleInit(ws, { sessionId, terminalToken });
             }
         } catch (error) {
             console.error('❌ Error in handleReconnect:', error);
