@@ -1568,7 +1568,7 @@ wss.on('connection', (ws) => {
             console.log('🔧 Initializing verified session:', sessionId, 'for user:', sessionInfo.user_id);
             
             // Use SQLite session's isolated workspace directory
-            const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path);
+            const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path).replace(/\\/g, '/');
             if (!fs.existsSync(sessionWorkspaceDir)) {
                 fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
                 console.log('📁 Created isolated session workspace:', sessionWorkspaceDir);
@@ -1884,7 +1884,7 @@ wss.on('connection', (ws) => {
                 
                 if (session.ptyReady) {
                     // Re-assert environment, cwd, and absolute npm vars on reconnect
-                    const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path);
+                    const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path).replace(/\\/g, '/');
                     try {
                         session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                         session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
@@ -2752,6 +2752,49 @@ app.post('/folders/batch-create', async (req, res) => {
         res.status(500).json({ error: 'Failed to batch create folders' });
     }
 });
+
+/**
+ * Scan directory for files and return them in the format expected by batchSaveFiles
+ */
+async function scanDirectoryForFiles(workspaceDir, baseDir) {
+    const files = [];
+    
+    try {
+        const scanDir = async (dir, relativePath = '') => {
+            const items = await fs.promises.readdir(dir, { withFileTypes: true });
+            
+            for (const item of items) {
+                const itemPath = path.join(dir, item.name);
+                const relativeItemPath = relativePath ? path.join(relativePath, item.name).replace(/\\/g, '/') : item.name;
+                
+                if (item.isDirectory()) {
+                    // Skip node_modules and other common directories that shouldn't be synced
+                    if (item.name === 'node_modules' || item.name === '.git' || item.name === '.npm-cache' || item.name === '.npm-global') {
+                        continue;
+                    }
+                    await scanDir(itemPath, relativeItemPath);
+                } else if (item.isFile()) {
+                    try {
+                        const content = await fs.promises.readFile(itemPath, 'utf8');
+                        files.push({
+                            filename: relativeItemPath,
+                            content: content
+                        });
+                    } catch (error) {
+                        console.log(`⚠️ Skipping binary file: ${relativeItemPath}`);
+                    }
+                }
+            }
+        };
+        
+        await scanDir(workspaceDir);
+        console.log(`📁 Scanned directory: ${workspaceDir}, found ${files.length} files`);
+        return files;
+    } catch (error) {
+        console.error('❌ Error scanning directory:', error);
+        return [];
+    }
+}
 
 // Start server
 server.listen(PORT, () => {

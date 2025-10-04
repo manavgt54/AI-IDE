@@ -111,7 +111,9 @@ function generateTerminalToken() {
 
 // Generate unique workspace path for session isolation
 function generateWorkspacePath(userId, sessionId) {
-  return path.join('./workspaces', `user_${userId}`, sessionId)
+  // Use forward slashes for Linux containers, normalize the path
+  const workspacePath = path.resolve('./workspaces', `user_${userId}`, sessionId)
+  return workspacePath.replace(/\\/g, '/')
 }
 
 export async function upsertUserAndCreateSession({ googleId, email, provider, githubId, githubToken, name }) {
