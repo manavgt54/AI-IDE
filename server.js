@@ -2768,8 +2768,8 @@ async function scanDirectoryForFiles(workspaceDir, baseDir) {
                 const relativeItemPath = relativePath ? path.join(relativePath, item.name).replace(/\\/g, '/') : item.name;
                 
                 if (item.isDirectory()) {
-                    // Skip node_modules and other common directories that shouldn't be synced
-                    if (item.name === 'node_modules' || item.name === '.git' || item.name === '.npm-cache' || item.name === '.npm-global') {
+                    // Skip only system directories that shouldn't be synced
+                    if (item.name === '.git' || item.name === '.npm-cache' || item.name === '.npm-global') {
                         continue;
                     }
                     await scanDir(itemPath, relativeItemPath);
