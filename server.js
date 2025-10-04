@@ -1568,7 +1568,6 @@ wss.on('connection', (ws) => {
             console.log('🔧 Initializing verified session:', sessionId, 'for user:', sessionInfo.user_id);
             
             // Use SQLite session's isolated workspace directory
-            const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path).replace(/\\/g, '/');
             if (!fs.existsSync(sessionWorkspaceDir)) {
                 fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
                 console.log('📁 Created isolated session workspace:', sessionWorkspaceDir);
@@ -1885,7 +1884,7 @@ wss.on('connection', (ws) => {
                 if (session.ptyReady) {
                     // Re-assert environment, cwd, and absolute npm vars on reconnect
                     const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path).replace(/\\/g, '/');
-                    try {
+                        try{
                         session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                         session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                         session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
