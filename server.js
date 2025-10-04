@@ -73,7 +73,18 @@ if (!fs.existsSync(WORKSPACE_DIR)) {
 const app = express();
 app.set('etag', false); // disable ETag to avoid 304 on API responses
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'https://ai-ide-5.onrender.com'],
+  origin: (origin, callback) => {
+    // Allow dev servers, Render frontend, and Electron (file:// => no origin)
+    const allowed = [
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:3000',
+      'https://ai-ide-5.onrender.com'
+    ];
+    if (!origin) return callback(null, true); // e.g., Electron file:// or curl
+    if (allowed.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  },
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
@@ -222,7 +233,9 @@ initSchema().then(() => console.log('🗄️ SQLite schema ready')).catch(e => c
 // Minimal Google auth endpoint: expects { googleId, email }
 app.post('/auth/google', async (req, res) => {
     try {
-        console.log('🔐 Google auth request received:', req.body);
+        console.log('🔐 Google auth request received');
+        console.log('   ↳ origin:', req.headers.origin, 'referer:', req.headers.referer);
+        console.log('   ↳ body:', req.body);
         const { googleId, email } = req.body || {};
         if (!googleId && !email) {
             console.log('❌ Missing googleId or email');
@@ -353,24 +366,25 @@ app.get('/auth/github/callback', async (req, res) => {
 // Validate an existing sessionId, and if it's missing in memory allow backend to recreate in-memory state
 app.post('/auth/session/validate', async (req, res) => {
     try {
-        const { sessionId, googleId, email } = req.body || {};
+        const { sessionId, terminalToken, googleId, email } = req.body || {};
         if (!sessionId && !googleId && !email) {
             return res.status(400).json({ error: 'sessionId or google identity required' });
         }
 
-        // 1) If sessionId provided, check it exists in DB
-        if (sessionId) {
-            const info = await getSessionInfo(sessionId);
-            if (info) {
-                return res.json({ ok: true, sessionId: info.session_id, userId: info.user_id });
+        // 1) If sessionId + terminalToken provided, validate strictly
+        if (sessionId && terminalToken) {
+            const session = await verifyTerminalSession(sessionId, terminalToken);
+            if (session) {
+                return res.json({ ok: true, sessionId: session.session_id, userId: session.user_id, terminalToken, workspacePath: session.workspace_path });
             }
+            return res.status(401).json({ ok: false, error: 'invalid_token' });
         }
 
         // 2) Fallback by Google identity to recover the user's permanent session
         if (googleId || email) {
             const existing = await getUserSessionByGoogleAccount({ googleId, email });
             if (existing) {
-                return res.json({ ok: true, sessionId: existing.sessionId, userId: existing.userId });
+                return res.json({ ok: true, sessionId: existing.sessionId, userId: existing.userId, terminalToken: existing.terminalToken, workspacePath: existing.workspacePath });
             }
         }
 
@@ -391,12 +405,19 @@ app.get('/files', async (req, res) => {
         res.set('Expires', '0');
         res.type('application/json');
         const sessionId = req.query.sessionId || req.headers['x-session-id'];
-        
+        const terminalToken = req.headers['x-terminal-token'];
         if (!sessionId) {
             return res.status(400).json({ error: 'Session ID required' });
         }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
         
-        // Get files from MySQL database for this session
+        // Get files from database for this session
         try {
             const files = await listFilesBySession(sessionId);
             // Return a flat list of filenames; frontend will build the tree
@@ -421,9 +442,17 @@ app.post('/files/open', async (req, res) => {
     try {
         const { filename } = req.body;
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         
         if (!filename || !sessionId) {
             return res.status(400).json({ error: 'filename and sessionId required' });
+        }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
         }
         
         const content = await readFileByName({ sessionId, filename });
@@ -444,9 +473,17 @@ app.post('/files/save', async (req, res) => {
     try {
         const { filename, content } = req.body;
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         
         if (!filename || !sessionId) {
             return res.status(400).json({ error: 'filename and sessionId required' });
+        }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
         }
         
         await saveFile({ sessionId, filename, content });
@@ -465,6 +502,13 @@ app.post('/files/save', async (req, res) => {
             // Write file to session workspace
             fs.writeFileSync(filePath, content);
             console.log(`📄 Synced saved file to session workspace: ${filename}`);
+            
+            // Trigger terminal refresh to show updated files
+            const session = sessions.get(sessionId);
+            if (session && session.ptyProcess && session.ptyReady) {
+                session.ptyProcess.write('echo "📁 File updated: ' + filename + '"\n');
+                session.ptyProcess.write('ls -la\n');
+            }
         } catch (syncError) {
             console.error(`⚠️ Error syncing saved file ${filename}:`, syncError);
         }
@@ -1098,12 +1142,20 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
 
         const actualPath = filePath || req.file.originalname;
         const content = req.file.buffer.toString('utf8');
+        const terminalToken = req.headers['x-terminal-token'];
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
         
         // Save to database
         await saveFile({ sessionId, filename: actualPath, content });
         
-        // Save to session workspace
-        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        // Save to session workspace (use verified workspace_path)
+        const sessionDir = path.resolve(verified.workspace_path);
         const fullPath = path.join(sessionDir, actualPath);
         const dirPath = path.dirname(fullPath);
         
@@ -1129,14 +1181,22 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
 app.post('/api/files/upload-chunk', upload.single('file'), async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         const { path: filePath, chunkIndex, totalChunks, uploadId, hash } = req.body;
         
         if (!sessionId || !req.file || !filePath || chunkIndex === undefined || totalChunks === undefined || !uploadId) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
 
         // Create chunk directory
-        const chunkDir = path.join(WORKSPACE_DIR, 'chunks', sessionId, uploadId);
+        const chunkDir = path.join(path.resolve(verified.workspace_path), '.chunks', uploadId);
         fs.mkdirSync(chunkDir, { recursive: true });
         
         // Save chunk
@@ -1155,14 +1215,22 @@ app.post('/api/files/upload-chunk', upload.single('file'), async (req, res) => {
 app.post('/api/files/upload-complete', async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         const { path: filePath, uploadId, totalChunks, hash } = req.body;
         
         if (!sessionId || !filePath || !uploadId || !totalChunks) {
             return res.status(400).json({ error: 'Missing required parameters' });
         }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
 
         // Reconstruct file from chunks
-        const chunkDir = path.join(WORKSPACE_DIR, 'chunks', sessionId, uploadId);
+        const chunkDir = path.join(path.resolve(verified.workspace_path), '.chunks', uploadId);
         const chunks = [];
         
         for (let i = 0; i < totalChunks; i++) {
@@ -1179,8 +1247,8 @@ app.post('/api/files/upload-complete', async (req, res) => {
         // Save to database
         await saveFile({ sessionId, filename: filePath, content });
         
-        // Save to session workspace
-        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        // Save to session workspace (use verified workspace_path)
+        const sessionDir = path.resolve(verified.workspace_path);
         const fullPath = path.join(sessionDir, filePath);
         const dirPath = path.dirname(fullPath);
         
@@ -1209,8 +1277,16 @@ app.post('/api/files/upload-complete', async (req, res) => {
 app.post('/files/upload', upload.array('files'), async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         if (!sessionId) {
             return res.status(400).json({ error: 'sessionId required' });
+        }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
         }
         const pathsRaw = (req.body && req.body.paths) ? req.body.paths : '[]';
         let paths = [];
@@ -1231,7 +1307,7 @@ app.post('/files/upload', upload.array('files'), async (req, res) => {
             
             // Immediately sync to session workspace for terminal access
             try {
-                const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                const sessionWorkspaceDir = path.resolve(verified.workspace_path);
                 const filePath = path.join(sessionWorkspaceDir, relPath);
                 const dirPath = path.dirname(filePath);
                 
@@ -1260,8 +1336,16 @@ app.post('/folders/delete', async (req, res) => {
     try {
         const { folderPath } = req.body;
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         if (!folderPath || !sessionId) {
             return res.status(400).json({ error: 'folderPath and sessionId required' });
+        }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
         }
         const files = await listFilesBySession(sessionId);
         const toDelete = files.filter(f => f.filename.startsWith(folderPath + '/'));
@@ -1271,7 +1355,7 @@ app.post('/folders/delete', async (req, res) => {
         // Remove placeholder if present
         await deleteFileByName({ sessionId, filename: path.join(folderPath, '.folder') });
         // Remove on disk
-        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const sessionWorkspaceDir = path.resolve(verified.workspace_path);
         const fullFolder = path.join(sessionWorkspaceDir, folderPath);
         if (fs.existsSync(fullFolder)) {
             fs.rmSync(fullFolder, { recursive: true, force: true });
@@ -1288,15 +1372,23 @@ app.delete('/files/:filename', async (req, res) => {
     try {
         const { filename } = req.params;
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         
         if (!filename || !sessionId) {
             return res.status(400).json({ error: 'filename and sessionId required' });
+        }
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
         }
         
         await deleteFileByName({ sessionId, filename });
         // Also remove from session workspace
         try {
-            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            const sessionWorkspaceDir = path.resolve(verified.workspace_path);
             const fullPath = path.join(sessionWorkspaceDir, filename);
             if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
         } catch {}
@@ -1426,8 +1518,9 @@ wss.on('connection', (ws) => {
             if (session.keepAliveInterval) {
                 clearInterval(session.keepAliveInterval);
             }
-            // Don't delete the session immediately - keep it for reconnection
-            console.log('🔄 Keeping session alive for potential reconnection');
+            // Keep session alive for reconnection but mark WebSocket as null
+            session.ws = null;
+            console.log('🔄 Keeping session alive for potential reconnection, WebSocket set to null');
         }
     });
     
@@ -1456,7 +1549,18 @@ wss.on('connection', (ws) => {
             // Verify terminal session with SQLite
             const sessionInfo = await verifyTerminalSession(sessionId, terminalToken);
             if (!sessionInfo) {
+                console.error('❌ Session verification failed:', { sessionId, terminalToken });
                 ws.send(JSON.stringify({ type: 'error', message: 'Invalid session or terminal token' }));
+                return;
+            }
+            
+            // Check if session already exists in memory and reuse it
+            if (sessions.has(sessionId)) {
+                console.log('🔄 Session already exists, reusing existing session:', sessionId);
+                const existingSession = sessions.get(sessionId);
+                existingSession.ws = ws; // Update WebSocket reference
+                currentSessionId = sessionId;
+                ws.send(JSON.stringify({ type: 'pty-ready' }));
                 return;
             }
             
