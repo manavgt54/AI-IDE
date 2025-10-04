@@ -2753,49 +2753,6 @@ app.post('/folders/batch-create', async (req, res) => {
     }
 });
 
-/**
- * Scan directory for files and return them in the format expected by batchSaveFiles
- */
-async function scanDirectoryForFiles(workspaceDir, baseDir) {
-    const files = [];
-    
-    try {
-        const scanDir = async (dir, relativePath = '') => {
-            const items = await fs.promises.readdir(dir, { withFileTypes: true });
-            
-            for (const item of items) {
-                const itemPath = path.join(dir, item.name);
-                const relativeItemPath = relativePath ? path.join(relativePath, item.name).replace(/\\/g, '/') : item.name;
-                
-                if (item.isDirectory()) {
-                    // Skip only system directories that shouldn't be synced
-                    if (item.name === '.git' || item.name === '.npm-cache' || item.name === '.npm-global') {
-                        continue;
-                    }
-                    await scanDir(itemPath, relativeItemPath);
-                } else if (item.isFile()) {
-                    try {
-                        const content = await fs.promises.readFile(itemPath, 'utf8');
-                        files.push({
-                            filename: relativeItemPath,
-                            content: content
-                        });
-                    } catch (error) {
-                        console.log(`⚠️ Skipping binary file: ${relativeItemPath}`);
-                    }
-                }
-            }
-        };
-        
-        await scanDir(workspaceDir);
-        console.log(`📁 Scanned directory: ${workspaceDir}, found ${files.length} files`);
-        return files;
-    } catch (error) {
-        console.error('❌ Error scanning directory:', error);
-        return [];
-    }
-}
-
 // Start server
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
