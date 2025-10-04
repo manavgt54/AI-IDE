@@ -490,7 +490,7 @@ app.post('/files/save', async (req, res) => {
         
         // Immediately sync to session workspace for terminal access
         try {
-            const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+            const sessionWorkspaceDir = path.resolve(verified.workspace_path).replace(/\\/g, '/');
             const filePath = path.join(sessionWorkspaceDir, filename);
             const dirPath = path.dirname(filePath);
             
@@ -563,8 +563,18 @@ app.post('/files/workspace', async (req, res) => {
             }
         });
         
-        // Create session workspace directory
-        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        // Get session info to use correct workspace path
+        const terminalToken = req.headers['x-terminal-token'];
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
+        
+        // Create session workspace directory using correct path
+        const sessionWorkspaceDir = path.resolve(verified.workspace_path).replace(/\\/g, '/');
         if (!fs.existsSync(sessionWorkspaceDir)) {
             fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
         }
@@ -661,7 +671,17 @@ app.post('/files/workspace-fast', async (req, res) => {
             return res.status(400).json({ error: 'workspace data and sessionId required' });
         }
 
-        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        // Get session info to use correct workspace path
+        const terminalToken = req.headers['x-terminal-token'];
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
+
+        const sessionWorkspaceDir = path.resolve(verified.workspace_path).replace(/\\/g, '/');
         if (!fs.existsSync(sessionWorkspaceDir)) {
             fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
         }
@@ -750,10 +770,20 @@ app.post('/files/compress-node-modules', async (req, res) => {
             return res.status(400).json({ error: 'nodeModulesData and sessionId required' });
         }
         
+        // Get session info to use correct workspace path
+        const terminalToken = req.headers['x-terminal-token'];
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
+        }
+        
         console.log(`🗜️ Compressing node_modules for session: ${sessionId}`);
         
-        // Create compressed storage directory
-        const compressedDir = path.join(WORKSPACE_DIR, 'compressed', sessionId);
+        // Create compressed storage directory using correct path
+        const compressedDir = path.join(path.resolve(verified.workspace_path), 'compressed');
         if (!fs.existsSync(compressedDir)) {
             fs.mkdirSync(compressedDir, { recursive: true });
         }
@@ -1568,6 +1598,7 @@ wss.on('connection', (ws) => {
             console.log('🔧 Initializing verified session:', sessionId, 'for user:', sessionInfo.user_id);
             
             // Use SQLite session's isolated workspace directory
+            const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path).replace(/\\/g, '/');
             if (!fs.existsSync(sessionWorkspaceDir)) {
                 fs.mkdirSync(sessionWorkspaceDir, { recursive: true });
                 console.log('📁 Created isolated session workspace:', sessionWorkspaceDir);
@@ -1884,7 +1915,7 @@ wss.on('connection', (ws) => {
                 if (session.ptyReady) {
                     // Re-assert environment, cwd, and absolute npm vars on reconnect
                     const sessionWorkspaceDir = path.resolve(sessionInfo.workspace_path).replace(/\\/g, '/');
-                        try{
+                    try {
                         session.ptyProcess.write('cd "' + sessionWorkspaceDir + '"\n');
                         session.ptyProcess.write('export PWD="' + sessionWorkspaceDir + '"\n');
                         session.ptyProcess.write('export HOME="' + sessionWorkspaceDir + '"\n');
@@ -1939,7 +1970,8 @@ wss.on('connection', (ws) => {
 
                     // Basic session-scoped FS sync for common commands
                     try {
-                        const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                        // Use the session's stored workspace path
+                        const sessionWorkspaceDir = session.workspacePath ? path.resolve(session.workspacePath).replace(/\\/g, '/') : session.currentCwd;
                         if (!session.currentCwd) session.currentCwd = sessionWorkspaceDir;
                         const trimmed = input.trim();
                         const parts = trimmed.split(/\s+/);
@@ -2086,8 +2118,6 @@ wss.on('connection', (ws) => {
                             session.commandTimeout = null;
                         }, 30000); // 30 seconds for other commands
                     }
-                    
-                    session.ptyProcess.write(input);
                 } else {
                     ws.send(JSON.stringify({ type: 'error', message: 'Terminal not ready' }));
                 }
@@ -2134,7 +2164,6 @@ async function scanDirectoryForFiles(rootDir, currentDir) {
             
             // Skip hidden files and common ignore patterns
             if (entry.name.startsWith('.') || 
-                entry.name === 'node_modules' || 
                 entry.name === '.git' ||
                 entry.name === '.npm-cache' ||
                 entry.name === '.npm-global') {
@@ -2662,7 +2691,8 @@ setInterval(async () => {
     try {
         for (const [sessionId, session] of sessions.entries()) {
             if (session.ptyReady && session.currentCwd) {
-                const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                // Use the session's stored workspace path
+                const sessionWorkspaceDir = session.workspacePath ? path.resolve(session.workspacePath).replace(/\\/g, '/') : session.currentCwd;
                 
                 // Get all files from database for this session
                 const dbFiles = await listFilesBySession(sessionId);
@@ -2698,8 +2728,24 @@ setInterval(async () => {
 app.post('/folders/batch-create', async (req, res) => {
     try {
         const { folders } = req.body;
+        const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
+        
         if (!folders || !Array.isArray(folders)) {
             return res.status(400).json({ error: 'Folders array is required' });
+        }
+        
+        if (!sessionId) {
+            return res.status(400).json({ error: 'sessionId required' });
+        }
+        
+        if (!terminalToken) {
+            return res.status(401).json({ error: 'Terminal token required' });
+        }
+        
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) {
+            return res.status(401).json({ error: 'Invalid session or token' });
         }
 
         console.log(`📁 Batch creating ${folders.length} folders...`);
@@ -2717,16 +2763,14 @@ app.post('/folders/batch-create', async (req, res) => {
 
         for (const folderPath of sortedFolders) {
             try {
-                // Create folder in workspace
-                const fullPath = path.join(WORKSPACE_DIR, folderPath);
+                // Create folder in session workspace using correct path
+                const sessionWorkspaceDir = path.resolve(verified.workspace_path).replace(/\\/g, '/');
+                const fullPath = path.join(sessionWorkspaceDir, folderPath);
                 await fs.promises.mkdir(fullPath, { recursive: true });
 
                 // Save to database (ignore if already exists)
                 try {
-                    await db.run(
-                        'INSERT OR IGNORE INTO files (filename, content, created_at, updated_at) VALUES (?, ?, ?, ?)',
-                        [folderPath, '', Date.now(), Date.now()]
-                    );
+                    await saveFile({ sessionId, filename: folderPath, content: '' });
                     createdFolders.push(folderPath);
                 } catch (dbError) {
                     // Folder might already exist in DB, that's okay
