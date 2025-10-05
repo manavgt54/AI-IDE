@@ -10,6 +10,7 @@ import unzipper from 'unzipper';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
+import { shouldPersistInDb, normalizeWorkspacePath, isExcludedPath } from './src/utils/persistence.js';
 import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, deleteFileByName, getSessionInfo, batchSaveFiles, verifyDatabaseData, verifyTerminalSession } from './src/db/sqlite.js';
 
 // Get current directory for ES modules
@@ -486,7 +487,10 @@ app.post('/files/save', async (req, res) => {
             return res.status(401).json({ error: 'Invalid session or token' });
         }
         
-        await saveFile({ sessionId, filename, content });
+        // Persist in DB only if allowed by policy
+        if (shouldPersistInDb(filename, content)) {
+            await saveFile({ sessionId, filename, content });
+        }
         
         // Immediately sync to session workspace for terminal access
         try {
@@ -608,10 +612,9 @@ app.post('/files/workspace', async (req, res) => {
         const localResults = await Promise.all(localSavePromises);
         
         // ✅ STEP 2: Batch save all files to MySQL database
-        const filesToSave = Object.entries(workspace).map(([filePath, content]) => ({
-            filename: filePath,
-            content: content
-        }));
+        const filesToSave = Object.entries(workspace)
+            .filter(([filePath, content]) => shouldPersistInDb(filePath, content))
+            .map(([filePath, content]) => ({ filename: filePath, content }));
         
         let batchResult = { success: true, saved: 0, updated: 0, errors: 0, total: filesToSave.length };
         try {
@@ -699,7 +702,8 @@ app.post('/files/workspace-fast', async (req, res) => {
         };
 
         // Thresholds
-        const LARGE_FILE_BYTES = 5 * 1024 * 1024; // 5MB
+        // Use configured threshold
+        const LARGE_FILE_BYTES = Math.max(0, ENV_CONFIG.PERSIST_MAX_FILE_MB) * 1024 * 1024;
 
         let savedToDisk = 0;
         let queuedForDb = 0;
@@ -712,6 +716,7 @@ app.post('/files/workspace-fast', async (req, res) => {
             const filePath = filePathRaw.replace(/^\/+/, '').replace(/\\/g, '/');
             if (!filePath) { skipped++; continue; }
             if (shouldIgnore(filePath)) { skipped++; continue; }
+            if (isExcludedPath(filePath)) { skipped++; continue; }
 
             try {
                 const fullPath = path.join(sessionWorkspaceDir, filePath);
@@ -726,7 +731,7 @@ app.post('/files/workspace-fast', async (req, res) => {
                 savedToDisk++;
 
                 // Only queue DB save for smaller files to avoid DB bloat and slowness
-                if (data.length <= LARGE_FILE_BYTES) {
+                if (data.length <= LARGE_FILE_BYTES && shouldPersistInDb(filePath, data)) {
                     queuedForDb++;
                     // Schedule without blocking response
                     setImmediate(async () => {
@@ -830,7 +835,7 @@ app.post('/files/restore-node-modules', async (req, res) => {
         
         console.log(`📦 Restoring node_modules for session: ${sessionId}`);
         
-        const compressedPath = path.join(WORKSPACE_DIR, 'compressed', sessionId, 'node_modules.gz');
+        const compressedPath = path.join(path.resolve(verified?.workspace_path || WORKSPACE_DIR), 'compressed', 'node_modules.gz');
         
         if (!fs.existsSync(compressedPath)) {
             return res.status(404).json({ error: 'No compressed node_modules found' });
@@ -853,7 +858,7 @@ app.post('/files/restore-node-modules', async (req, res) => {
                 const nodeModulesData = JSON.parse(decompressedData);
                 
                 // Restore files to session workspace
-                const sessionWorkspaceDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+                const sessionWorkspaceDir = path.resolve(verified?.workspace_path || path.join(WORKSPACE_DIR, 'sessions', sessionId));
                 let restoredCount = 0;
                 
                 for (const [filePath, content] of Object.entries(nodeModulesData)) {
@@ -905,10 +910,14 @@ app.post('/files/restore-node-modules', async (req, res) => {
 app.post('/upload/zip', async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         const project = (req.query.project || 'workspace').toString().replace(/[^a-zA-Z0-9_\-\/]/g, '');
         if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+        if (!terminalToken) return res.status(401).json({ error: 'Terminal token required' });
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) return res.status(401).json({ error: 'Invalid session or token' });
 
-        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const sessionDir = path.resolve(verified.workspace_path);
         const targetDir = path.join(sessionDir, project);
         const tempDir = path.join(sessionDir, `.upload_tmp_${Date.now()}`);
         fs.mkdirSync(tempDir, { recursive: true });
@@ -953,12 +962,16 @@ app.post('/upload/zip', async (req, res) => {
 app.post('/upload/zip-chunk', async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         const id = (req.query.id || '').toString();
         const project = (req.query.project || 'workspace').toString().replace(/[^a-zA-Z0-9_\-\/]/g, '');
         const index = parseInt((req.query.index || '0').toString(), 10);
         if (!sessionId || !id || Number.isNaN(index)) return res.status(400).json({ error: 'missing params' });
+        if (!terminalToken) return res.status(401).json({ error: 'Terminal token required' });
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) return res.status(401).json({ error: 'Invalid session or token' });
 
-        const chunkDir = path.join(WORKSPACE_DIR, 'sessions', sessionId, '.chunks', id);
+        const chunkDir = path.join(path.resolve(verified.workspace_path), '.chunks', id);
         fs.mkdirSync(chunkDir, { recursive: true });
         const chunkPath = path.join(chunkDir, `${index}.part`);
 
@@ -979,11 +992,15 @@ app.post('/upload/zip-chunk', async (req, res) => {
 app.post('/upload/zip-chunk/complete', async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         const id = (req.query.id || '').toString();
         const project = (req.query.project || 'workspace').toString().replace(/[^a-zA-Z0-9_\-\/]/g, '');
         if (!sessionId || !id) return res.status(400).json({ error: 'missing params' });
+        if (!terminalToken) return res.status(401).json({ error: 'Terminal token required' });
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) return res.status(401).json({ error: 'Invalid session or token' });
 
-        const baseDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const baseDir = path.resolve(verified.workspace_path);
         const chunkDir = path.join(baseDir, '.chunks', id);
         const tempZip = path.join(baseDir, `.upload_${id}.zip`);
 
@@ -1038,17 +1055,21 @@ app.post('/upload/zip-chunk/complete', async (req, res) => {
 app.post('/api/files/upload-batch', async (req, res) => {
     try {
         const sessionId = req.headers['x-session-id'];
+        const terminalToken = req.headers['x-terminal-token'];
         const { batchId, files, projectId = 'workspace' } = req.body;
         
         if (!sessionId || !batchId || !files || !Array.isArray(files)) {
             return res.status(400).json({ error: 'sessionId, batchId, and files array required' });
         }
+        if (!terminalToken) return res.status(401).json({ error: 'Terminal token required' });
+        const verified = await verifyTerminalSession(String(sessionId), String(terminalToken));
+        if (!verified) return res.status(401).json({ error: 'Invalid session or token' });
 
         console.log(`📦 Processing batch ${batchId} with ${files.length} files for session: ${sessionId}`);
 
         // Create staging directory
-        const stagingDir = path.join(WORKSPACE_DIR, 'staging', sessionId, batchId);
-        const sessionDir = path.join(WORKSPACE_DIR, 'sessions', sessionId);
+        const stagingDir = path.join(path.resolve(verified.workspace_path), '.staging', batchId);
+        const sessionDir = path.resolve(verified.workspace_path);
         const projectDir = path.join(sessionDir, projectId);
         
         fs.mkdirSync(stagingDir, { recursive: true });
@@ -1120,11 +1141,13 @@ app.post('/api/files/upload-batch', async (req, res) => {
                 // Save to database
                 for (const fileData of files) {
                     try {
-                        await saveFile({ 
-                            sessionId, 
-                            filename: fileData.path, 
-                            content: fileData.content 
-                        });
+                        if (shouldPersistInDb(fileData.path, fileData.content)) {
+                            await saveFile({ 
+                                sessionId, 
+                                filename: fileData.path, 
+                                content: fileData.content 
+                            });
+                        }
                     } catch (error) {
                         console.error(`❌ Error saving to database:`, error);
                     }
@@ -1181,8 +1204,10 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
             return res.status(401).json({ error: 'Invalid session or token' });
         }
         
-        // Save to database
-        await saveFile({ sessionId, filename: actualPath, content });
+        // Save to database (policy-gated)
+        if (shouldPersistInDb(actualPath, content)) {
+            await saveFile({ sessionId, filename: actualPath, content });
+        }
         
         // Save to session workspace (use verified workspace_path)
         const sessionDir = path.resolve(verified.workspace_path);
@@ -1274,8 +1299,10 @@ app.post('/api/files/upload-complete', async (req, res) => {
         
         const content = Buffer.concat(chunks).toString('utf8');
         
-        // Save to database
-        await saveFile({ sessionId, filename: filePath, content });
+        // Save to database (policy-gated)
+        if (shouldPersistInDb(filePath, content)) {
+            await saveFile({ sessionId, filename: filePath, content });
+        }
         
         // Save to session workspace (use verified workspace_path)
         const sessionDir = path.resolve(verified.workspace_path);
@@ -1332,8 +1359,10 @@ app.post('/files/upload', upload.array('files'), async (req, res) => {
             const relPath = (paths[i] || file.originalname || '').replace(/^\/+/, '').replace(/\\/g, '/');
             if (!relPath) continue;
             
-            // Save to database
-            await saveFile({ sessionId, filename: relPath, content: file.buffer });
+            // Save to database (policy-gated)
+            if (shouldPersistInDb(relPath, file.buffer)) {
+                await saveFile({ sessionId, filename: relPath, content: file.buffer });
+            }
             
             // Immediately sync to session workspace for terminal access
             try {

@@ -6,6 +6,11 @@ export const ENV_CONFIG = {
   
   // Workspace Configuration
   WORKSPACE_DIR: process.env.WORKSPACE_DIR || './workspace',
+  // Persistence Configuration
+  PERSIST_MAX_FILE_MB: parseInt(process.env.PERSIST_MAX_FILE_MB || '10'),
+  // Comma-separated list
+  PERSIST_EXCLUDE_DIRS: (process.env.PERSIST_EXCLUDE_DIRS || 'node_modules,.git,dist,build,.cache').split(',').map(s => s.trim()).filter(Boolean),
+  USER_VOLUME_MODE: process.env.USER_VOLUME_MODE || 'per_user',
   
   // Terminal Configuration
   TERM: process.env.TERM || 'xterm-256color',
@@ -49,6 +54,9 @@ export const ENV_CONFIG = {
 // Helper functions
 export const getPort = () => ENV_CONFIG.PORT;
 export const getWorkspaceDir = () => ENV_CONFIG.WORKSPACE_DIR;
+export const getPersistMaxFileMb = () => ENV_CONFIG.PERSIST_MAX_FILE_MB;
+export const getPersistExcludeDirs = () => ENV_CONFIG.PERSIST_EXCLUDE_DIRS;
+export const getUserVolumeMode = () => ENV_CONFIG.USER_VOLUME_MODE;
 export const getNodeEnv = () => ENV_CONFIG.NODE_ENV;
 export const isDevelopment = () => ENV_CONFIG.NODE_ENV === 'development';
 export const isProduction = () => ENV_CONFIG.NODE_ENV === 'production';
