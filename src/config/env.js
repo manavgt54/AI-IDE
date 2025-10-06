@@ -42,6 +42,11 @@ export const ENV_CONFIG = {
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || '*',
   CORS_ENABLED: process.env.CORS_ENABLED !== 'false', // Default to true
   
+  // GitHub OAuth Configuration
+  GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID || 'Ov23liJOQMa53qoe6VaE',
+  GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET || 'your_github_client_secret',
+  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
+  
   // Logging Configuration
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
   LOG_FORMAT: process.env.LOG_FORMAT || 'combined',
@@ -62,3 +67,6 @@ export const isDevelopment = () => ENV_CONFIG.NODE_ENV === 'development';
 export const isProduction = () => ENV_CONFIG.NODE_ENV === 'production';
 export const isPtyAllowed = () => ENV_CONFIG.PTY_ALLOWED;
 export const getMaxTerminalSessions = () => ENV_CONFIG.MAX_TERMINAL_SESSIONS;
+export const getGitHubClientId = () => ENV_CONFIG.GITHUB_CLIENT_ID;
+export const getGitHubClientSecret = () => ENV_CONFIG.GITHUB_CLIENT_SECRET;
+export const getFrontendUrl = () => ENV_CONFIG.FRONTEND_URL;

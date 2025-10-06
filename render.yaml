@@ -35,3 +35,10 @@ services:
         value: "false"
       - key: NPM_CONFIG_AUDIT
         value: "false"
+      # GitHub OAuth Configuration
+      - key: GITHUB_CLIENT_ID
+        value: "Ov23liJOQMa53qoe6VaE"
+      - key: GITHUB_CLIENT_SECRET
+        value: "your_github_client_secret"
+      - key: FRONTEND_URL
+        value: "https://ai-ide-5.onrender.com"

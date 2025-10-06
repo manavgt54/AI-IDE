@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import unzipper from 'unzipper';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
-import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction } from './src/config/env.js';
+import { ENV_CONFIG, getPort, getWorkspaceDir, isDevelopment, isProduction, getGitHubClientId, getGitHubClientSecret, getFrontendUrl } from './src/config/env.js';
 import { shouldPersistInDb, normalizeWorkspacePath, isExcludedPath } from './src/utils/persistence.js';
 import { initSchema, upsertUserAndCreateSession, getUserSessionByGoogleAccount, readFileByName, saveFile, listFilesBySession, deleteSession, deleteFileByName, getSessionInfo, batchSaveFiles, verifyDatabaseData, verifyTerminalSession } from './src/db/sqlite.js';
 
@@ -307,8 +307,8 @@ app.get('/auth/github/callback', async (req, res) => {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                client_id: process.env.GITHUB_CLIENT_ID || 'Ov23liJ8QZqJqJqJqJqJq',
-                client_secret: process.env.GITHUB_CLIENT_SECRET || 'your_github_client_secret',
+                client_id: getGitHubClientId(),
+                client_secret: getGitHubClientSecret(),
                 code: code,
                 state: state
             })
@@ -354,12 +354,12 @@ app.get('/auth/github/callback', async (req, res) => {
         });
 
         // Redirect to frontend with session data
-        const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/github/success?sessionId=${sessionData.sessionId}&terminalToken=${sessionData.terminalToken}&token=${tokenData.access_token}`;
+        const redirectUrl = `${getFrontendUrl()}/auth/github/success?sessionId=${sessionData.sessionId}&terminalToken=${sessionData.terminalToken}&token=${tokenData.access_token}`;
         res.redirect(redirectUrl);
 
     } catch (error) {
         console.error('❌ GitHub OAuth error:', error);
-        const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/github/error?error=${encodeURIComponent(error.message)}`;
+        const errorUrl = `${getFrontendUrl()}/auth/github/error?error=${encodeURIComponent(error.message)}`;
         res.redirect(errorUrl);
     }
 });
