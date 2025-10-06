@@ -39,6 +39,6 @@ services:
       - key: GITHUB_CLIENT_ID
         value: "Ov23liJOQMa53qoe6VaE"
       - key: GITHUB_CLIENT_SECRET
-        value: "your_github_client_secret"
+        value: "7ff18dcba8a201f24f867137e415dda89354b0f9"
       - key: FRONTEND_URL
         value: "https://ai-ide-5.onrender.com"
