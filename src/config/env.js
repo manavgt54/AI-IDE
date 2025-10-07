@@ -69,4 +69,8 @@ export const isPtyAllowed = () => ENV_CONFIG.PTY_ALLOWED;
 export const getMaxTerminalSessions = () => ENV_CONFIG.MAX_TERMINAL_SESSIONS;
 export const getGitHubClientId = () => ENV_CONFIG.GITHUB_CLIENT_ID;
 export const getGitHubClientSecret = () => ENV_CONFIG.GITHUB_CLIENT_SECRET;
-export const getFrontendUrl = () => ENV_CONFIG.FRONTEND_URL;
+export const getFrontendUrl = () => {
+  const url = ENV_CONFIG.FRONTEND_URL;
+  // Remove trailing slash to prevent double slashes in URL construction
+  return url.endsWith('/') ? url.slice(0, -1) : url;
+};
