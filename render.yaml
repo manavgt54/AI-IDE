@@ -41,4 +41,4 @@ services:
       - key: GITHUB_CLIENT_SECRET
         value: "7ff18dcba8a201f24f867137e415dda89354b0f9"
       - key: FRONTEND_URL
-        value: "http://localhost:5173/"
+        value: "http://localhost:5173"
