@@ -303,14 +303,15 @@ app.get('/auth/github/callback', async (req, res) => {
         const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
             method: 'POST',
             headers: {
-                'Accept': 'application/json',
                 'Content-Type': 'application/json',
+                'Accept': 'application/json'
             },
             body: JSON.stringify({
                 client_id: getGitHubClientId(),
                 client_secret: getGitHubClientSecret(),
                 code: code,
-                state: state
+                state: state,
+                redirect_uri: `${getFrontendUrl()}/auth/github/callback` // Add this line
             })
         });
 
