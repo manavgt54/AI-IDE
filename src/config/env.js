@@ -39,7 +39,7 @@ export const ENV_CONFIG = {
   NPM_CONFIG_AUDIT: process.env.NPM_CONFIG_AUDIT || 'false',
   
   // Security Configuration
-  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || '*',
+  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || 'https://frontend-n48p8ln49-manavs-projects-84b1798c.vercel.app',
   CORS_ENABLED: process.env.CORS_ENABLED !== 'false', // Default to true
   
   // GitHub OAuth Configuration

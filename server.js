@@ -75,20 +75,20 @@ const app = express();
 app.set('etag', false); // disable ETag to avoid 304 on API responses
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow dev servers, Render frontend, and Electron (file:// => no origin)
-    const allowed = [
-      'http://localhost:5173',
-      'http://localhost:5174',
-      'http://localhost:3000',
-      'https://ai-ide-5.onrender.com'
-    ];
-    if (!origin) return callback(null, true); // e.g., Electron file:// or curl
-    if (allowed.includes(origin)) return callback(null, true);
-    return callback(null, false);
+    const allowedOrigins = ENV_CONFIG.ALLOWED_ORIGINS === '*'
+      ? ['*'] // Allow all origins if configured as such
+      : ENV_CONFIG.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
+
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn('CORS blocked request from origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
   },
-  credentials: true
+  credentials: true, // Allow cookies to be sent
 }));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'workspace')));
 // Multer in-memory storage for binary-safe uploads
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
