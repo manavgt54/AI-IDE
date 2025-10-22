@@ -88,7 +88,7 @@ app.use(cors({
   },
   credentials: true, // Allow cookies to be sent
 }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'workspace')));
 // Multer in-memory storage for binary-safe uploads
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
