@@ -1,4 +1,5 @@
 #!/bin/bash
+#!/bin/bash
 
 echo "🚀 Starting IDE Backend build process..."
 

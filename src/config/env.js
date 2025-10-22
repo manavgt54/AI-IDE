@@ -45,7 +45,7 @@ export const ENV_CONFIG = {
   // GitHub OAuth Configuration
   GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID || 'Ov23liJOQMa53qoe6VaE',
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET || 'your_github_client_secret',
-  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
+  FRONTEND_URL: process.env.FRONTEND_URL || 'https://frontend-ide.vercel.app/',
   
   // Logging Configuration
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
